@@ -52,11 +52,34 @@ enum LauncherEntry: Identifiable, Hashable, Sendable {
     }
 }
 
+struct LauncherReorderPreview: Equatable {
+    let sourceID: String
+    let page: Int
+    let slot: Int
+}
+
+struct RootPagerLayoutInfo {
+    let topOffset: Double
+    let size: CGSize
+    let metrics: RootGridMetrics
+    let pageSize: Int
+}
+
+struct FolderPagerLayoutInfo {
+    let origin: CGPoint
+    let cellWidth: Double
+    let columnCount: Int
+    let capacity: Int
+    let columnSpacing: Double
+    let rowSpacing: Double
+    let itemHeight: Double
+}
+
 enum LaunchpadPageMotion {
     static let maximumVelocity = 4_000.0
     static let velocityProjectionDuration = 0.32
     static let pageDecisionRatio = 0.15
-    static let standardDuration = 0.34
+    static let standardDuration = 0.36
     static let minimumDuration = 0.22
     static let reducedMotionDuration = 0.22
 
@@ -66,9 +89,9 @@ enum LaunchpadPageMotion {
             : 0
         let velocityReduction = min(safeVelocity * 0.025, standardDuration - minimumDuration)
         return .timingCurve(
-            0.20,
-            0.82,
-            0.20,
+            0.22,
+            0.86,
+            0.24,
             1.00,
             duration: standardDuration - velocityReduction
         )
@@ -336,6 +359,8 @@ struct RootGridMetrics: Equatable, Sendable {
     @Published private(set) var reducesTransparency =
         NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
     @Published private(set) var pageSwapGeneration = 0
+    @Published private(set) var reorderPreview: LauncherReorderPreview?
+    @Published private(set) var reorderDragSourceID: String?
 
     private let groupsKey = "launcher.groups.v2"
     private let orderKey = "launcher.order.v1"
@@ -374,7 +399,11 @@ struct RootGridMetrics: Equatable, Sendable {
     private var reorderDragTimer: Timer?
     private var reorderEdgeHoverDirection: Int?
     private var reorderEdgeHoverStartDate: Date?
+    private var reorderEdgeHoverHasFlipped = false
     private var accessibilityOptionsObserver: NSObjectProtocol?
+    private var squareIconPaths: Set<String> = []
+    private var rootPagerLayoutInfo: RootPagerLayoutInfo?
+    private var folderPagerLayoutInfo: FolderPagerLayoutInfo?
 
     init(defaults: UserDefaults = .standard, autoScan: Bool = true) {
         self.defaults = defaults
@@ -473,8 +502,17 @@ struct RootGridMetrics: Equatable, Sendable {
         let pixelSize = LauncherMemoryPolicy.iconPixelSize
         let logicalSize = LauncherMemoryPolicy.iconLogicalPointSize
         icon.size = NSSize(width: logicalSize, height: logicalSize)
+        let standardizedPath = app.url.standardizedFileURL.path
+        if !squareIconPaths.contains(standardizedPath),
+           Self.iconHasOpaqueCorners(icon) {
+            squareIconPaths.insert(standardizedPath)
+        }
         iconImageCache.setObject(icon, forKey: key, cost: pixelSize * pixelSize * 4)
         return icon
+    }
+
+    func iconNeedsRoundedCorners(for app: AppItem) -> Bool {
+        squareIconPaths.contains(app.url.standardizedFileURL.path)
     }
 
     func cachedIcon(for app: AppItem) -> NSImage? {
@@ -676,6 +714,10 @@ struct RootGridMetrics: Equatable, Sendable {
         )
     }
 
+    func setCurrentPage(_ page: Int) {
+        currentPage = min(max(0, page), pageCount - 1)
+    }
+
     func setFolderPageCount(_ count: Int) {
         folderPageCount = max(1, count)
         folderPage = min(folderPage, folderPageCount - 1)
@@ -734,6 +776,7 @@ struct RootGridMetrics: Equatable, Sendable {
             if !groups[index].appPaths.contains(sourceApp.url.path) { groups[index].appPaths.append(sourceApp.url.path) }
         default: break
         }
+        clearReorderDragState()
     }
 
     func reorder(_ sourceID: String, beside targetID: String, after: Bool) {
@@ -745,6 +788,7 @@ struct RootGridMetrics: Equatable, Sendable {
         guard let targetIndex = order.firstIndex(of: targetID) else { return }
         order.insert(sourceID, at: min(order.count, targetIndex + (after ? 1 : 0)))
         rootOrder = order
+        clearReorderDragState()
     }
 
     func addToOpenGroup(_ sourceID: String) {
@@ -757,6 +801,7 @@ struct RootGridMetrics: Equatable, Sendable {
         detachFromGroups(paths: [path])
         guard let refreshedIndex = groups.firstIndex(where: { $0.id == groupID }) else { return }
         if !groups[refreshedIndex].appPaths.contains(path) { groups[refreshedIndex].appPaths.append(path) }
+        clearReorderDragState()
     }
 
     func moveOutOfOpenGroup(_ sourceID: String) {
@@ -777,6 +822,7 @@ struct RootGridMetrics: Equatable, Sendable {
         groups[index].appPaths.removeAll { $0 == sourcePath }
         let insertion = min(targetIndex, groups[index].appPaths.count)
         groups[index].appPaths.insert(sourcePath, at: insertion)
+        clearReorderDragState()
     }
 
     func reorderToPageEnd(_ sourceID: String, page: Int, pageSize: Int) {
@@ -794,6 +840,30 @@ struct RootGridMetrics: Equatable, Sendable {
             order.insert(sourceID, at: min(order.count, start))
         }
         rootOrder = order
+        clearReorderDragState()
+    }
+
+    func reorderToSlot(_ sourceID: String, page: Int, slot: Int, pageSize: Int) {
+        guard sourceID.count <= 4_200, pageSize > 0 else { return }
+        let identifiers = rootEntries.map(\.id)
+        guard identifiers.contains(sourceID) else { return }
+        let pageStart = min(max(0, page) * pageSize, identifiers.count)
+        let pageEnd = min(pageStart + pageSize, identifiers.count)
+        let pageIDs = Array(identifiers[pageStart..<pageEnd])
+        var order = identifiers
+        order.removeAll { $0 == sourceID }
+        if slot < pageIDs.count,
+           let anchor = pageIDs[slot...].first(where: { $0 != sourceID }),
+           let anchorIndex = order.firstIndex(of: anchor) {
+            order.insert(sourceID, at: anchorIndex)
+        } else if let lastAnchor = pageIDs.last(where: { $0 != sourceID }),
+                  let anchorIndex = order.firstIndex(of: lastAnchor) {
+            order.insert(sourceID, at: anchorIndex + 1)
+        } else {
+            order.insert(sourceID, at: min(order.count, pageStart))
+        }
+        rootOrder = order
+        clearReorderDragState()
     }
 
     func reorderInOpenGroupToPageEnd(_ sourceID: String, page: Int, capacity: Int) {
@@ -812,9 +882,35 @@ struct RootGridMetrics: Equatable, Sendable {
         } else {
             groups[index].appPaths.insert(sourcePath, at: min(groups[index].appPaths.count, start))
         }
+        clearReorderDragState()
     }
 
-    func startReorderDrag() {
+    func reorderInOpenGroupToSlot(_ sourceID: String, slot: Int, capacity: Int) {
+        guard sourceID.count <= 4_200, sourceID.hasPrefix("app:"), capacity > 0,
+              let groupID = openGroupID,
+              let index = groups.firstIndex(where: { $0.id == groupID }) else { return }
+        let sourcePath = String(sourceID.dropFirst(4))
+        let paths = groups[index].appPaths
+        guard paths.contains(sourcePath) else { return }
+        let pageStart = min(folderPage * capacity, paths.count)
+        let pageEnd = min(pageStart + capacity, paths.count)
+        let pagePaths = Array(paths[pageStart..<pageEnd])
+        groups[index].appPaths.removeAll { $0 == sourcePath }
+        if slot < pagePaths.count,
+           let anchor = pagePaths[slot...].first(where: { $0 != sourcePath }),
+           let anchorIndex = groups[index].appPaths.firstIndex(of: anchor) {
+            groups[index].appPaths.insert(sourcePath, at: anchorIndex)
+        } else if let lastAnchor = pagePaths.last(where: { $0 != sourcePath }),
+                  let anchorIndex = groups[index].appPaths.firstIndex(of: lastAnchor) {
+            groups[index].appPaths.insert(sourcePath, at: anchorIndex + 1)
+        } else {
+            groups[index].appPaths.insert(sourcePath, at: min(groups[index].appPaths.count, pageStart))
+        }
+        clearReorderDragState()
+    }
+
+    func startReorderDrag(_ sourceID: String) {
+        reorderDragSourceID = sourceID
         resetReorderEdgeHover()
         guard reorderDragTimer == nil else { return }
         let timer = Timer(timeInterval: 0.08, repeats: true) { [weak self] _ in
@@ -829,6 +925,46 @@ struct RootGridMetrics: Equatable, Sendable {
         reorderDragTimer?.invalidate()
         reorderDragTimer = nil
         resetReorderEdgeHover()
+        clearReorderDragState()
+    }
+
+    func clearReorderDragState() {
+        reorderPreview = nil
+        reorderDragSourceID = nil
+    }
+
+    func updateRootPagerLayout(
+        topOffset: Double,
+        size: CGSize,
+        metrics: RootGridMetrics,
+        pageSize: Int
+    ) {
+        rootPagerLayoutInfo = RootPagerLayoutInfo(
+            topOffset: topOffset,
+            size: size,
+            metrics: metrics,
+            pageSize: pageSize
+        )
+    }
+
+    func updateFolderPagerLayout(
+        origin: CGPoint,
+        cellWidth: Double,
+        columnCount: Int,
+        capacity: Int,
+        columnSpacing: Double,
+        rowSpacing: Double,
+        itemHeight: Double
+    ) {
+        folderPagerLayoutInfo = FolderPagerLayoutInfo(
+            origin: origin,
+            cellWidth: cellWidth,
+            columnCount: columnCount,
+            capacity: capacity,
+            columnSpacing: columnSpacing,
+            rowSpacing: rowSpacing,
+            itemHeight: itemHeight
+        )
     }
 
     private func tickReorderDrag() {
@@ -841,14 +977,16 @@ struct RootGridMetrics: Equatable, Sendable {
         let mouse = NSEvent.mouseLocation
         guard frame.contains(mouse) else {
             resetReorderEdgeHover()
+            reorderPreview = nil
             return
         }
         let localX = mouse.x - frame.minX
         let localY = mouse.y - frame.minY
-        let edgeWidth: CGFloat = 56
+        let edgeWidth: CGFloat = 48
         let searchAreaHeight: CGFloat = 96
         guard localY < frame.height - searchAreaHeight else {
             resetReorderEdgeHover()
+            reorderPreview = nil
             return
         }
         if localX < edgeWidth {
@@ -858,6 +996,94 @@ struct RootGridMetrics: Equatable, Sendable {
         } else {
             resetReorderEdgeHover()
         }
+        updateReorderPreview(localX: localX, localYFromTop: frame.height - localY)
+    }
+
+    private func updateReorderPreview(localX: Double, localYFromTop: Double) {
+        if openGroupID == nil {
+            updateRootReorderPreview(localX: localX, localYFromTop: localYFromTop)
+        } else {
+            updateFolderReorderPreview(localX: localX, localYFromTop: localYFromTop)
+        }
+    }
+
+    private func updateRootReorderPreview(localX: Double, localYFromTop: Double) {
+        guard let sourceID = reorderDragSourceID, search.isEmpty,
+              let layout = rootPagerLayoutInfo,
+              layout.size.width > 1, layout.size.height > 1,
+              rootEntries.contains(where: { $0.id == sourceID }) else {
+            reorderPreview = nil
+            return
+        }
+        let metrics = layout.metrics
+        let pagerY = localYFromTop - layout.topOffset
+        guard localX >= -4, localX <= layout.size.width + 4,
+              pagerY >= metrics.topInset - 12,
+              pagerY <= metrics.topInset + metrics.gridHeight + 12 else {
+            reorderPreview = nil
+            return
+        }
+        let availableWidth = max(1, layout.size.width - metrics.horizontalPadding * 2)
+        let cellWidth = availableWidth / Double(metrics.columnCount)
+        let rawColumn = Int((localX - metrics.horizontalPadding) / cellWidth)
+        let column = min(max(0, rawColumn), metrics.columnCount - 1)
+        let itemHeight = metrics.iconSize + RootGridMetrics.labelHeight
+        let rawRow = Int((pagerY - metrics.topInset) / (itemHeight + RootGridMetrics.rowSpacing))
+        let row = min(max(0, rawRow), metrics.rowCount - 1)
+        let cellDX = localX - metrics.horizontalPadding - Double(column) * cellWidth - cellWidth / 2
+        let cellDY = pagerY - metrics.topInset - Double(row) * (itemHeight + RootGridMetrics.rowSpacing)
+        let iconHalf = metrics.iconSize / 2
+        if abs(cellDX) < iconHalf, cellDY >= -4, cellDY <= itemHeight + 4 {
+            reorderPreview = nil
+            return
+        }
+        let pageCount = max(1, Int(ceil(Double(rootEntries.count) / Double(layout.pageSize))))
+        let page = min(currentPage, pageCount - 1)
+        let pageStart = page * layout.pageSize
+        let countOnPage = min(layout.pageSize, max(0, rootEntries.count - pageStart))
+        let slot = min(
+            max(0, row * metrics.columnCount + column + (cellDX >= 0 ? 1 : 0)),
+            countOnPage
+        )
+        reorderPreview = LauncherReorderPreview(sourceID: sourceID, page: page, slot: slot)
+    }
+
+    private func updateFolderReorderPreview(localX: Double, localYFromTop: Double) {
+        guard let sourceID = reorderDragSourceID, sourceID.hasPrefix("app:"),
+              let layout = folderPagerLayoutInfo,
+              let groupID = openGroupID,
+              let group = groups.first(where: { $0.id == groupID }) else {
+            reorderPreview = nil
+            return
+        }
+        let dx = localX - layout.origin.x
+        let dy = localYFromTop - layout.origin.y
+        let columnStride = layout.cellWidth + layout.columnSpacing
+        let rowStride = layout.itemHeight + layout.rowSpacing
+        let rowCount = max(1, layout.capacity / max(1, layout.columnCount))
+        guard dx >= -16, dx <= Double(layout.columnCount) * columnStride,
+              dy >= -12, dy <= Double(rowCount) * rowStride else {
+            reorderPreview = nil
+            return
+        }
+        let column = min(max(0, Int(dx / columnStride)), layout.columnCount - 1)
+        let row = min(max(0, Int(dy / rowStride)), rowCount - 1)
+        let cellDX = dx - Double(column) * columnStride - layout.cellWidth / 2
+        let cellDY = dy - Double(row) * rowStride
+        let iconHalf = iconSize / 2
+        if abs(cellDX) < iconHalf, cellDY >= -4, cellDY <= layout.itemHeight + 4 {
+            reorderPreview = nil
+            return
+        }
+        let pageCount = max(1, Int(ceil(Double(group.appPaths.count) / Double(layout.capacity))))
+        let page = min(folderPage, pageCount - 1)
+        let pageStart = page * layout.capacity
+        let countOnPage = min(layout.capacity, max(0, group.appPaths.count - pageStart))
+        let slot = min(
+            max(0, row * layout.columnCount + column + (cellDX >= 0 ? 1 : 0)),
+            countOnPage
+        )
+        reorderPreview = LauncherReorderPreview(sourceID: sourceID, page: page, slot: slot)
     }
 
     private func advanceReorderEdgeHover(direction: Int) {
@@ -865,10 +1091,13 @@ struct RootGridMetrics: Equatable, Sendable {
         if reorderEdgeHoverDirection != direction {
             reorderEdgeHoverDirection = direction
             reorderEdgeHoverStartDate = now
+            reorderEdgeHoverHasFlipped = false
             return
         }
+        let dwell = reorderEdgeHoverHasFlipped ? 0.55 : 0.7
         guard let start = reorderEdgeHoverStartDate,
-              now.timeIntervalSince(start) >= 0.45 else { return }
+              now.timeIntervalSince(start) >= dwell else { return }
+        reorderEdgeHoverHasFlipped = true
         reorderEdgeHoverStartDate = now
         if openGroupID == nil {
             guard search.isEmpty else { return }
@@ -881,6 +1110,7 @@ struct RootGridMetrics: Equatable, Sendable {
     private func resetReorderEdgeHover() {
         reorderEdgeHoverDirection = nil
         reorderEdgeHoverStartDate = nil
+        reorderEdgeHoverHasFlipped = false
     }
 
     func deletePendingApplication() {
@@ -1078,11 +1308,8 @@ struct RootGridMetrics: Equatable, Sendable {
         backgroundLoadTask = nil
 
         cacheMaintenanceTask?.cancel()
-        let iconLoader = iconLoader
         let backgroundImageLoader = backgroundImageLoader
         cacheMaintenanceTask = Task {
-            await iconLoader.removeAllCachedIcons()
-            guard !Task.isCancelled else { return }
             await backgroundImageLoader.removeAllCachedImages()
         }
     }
@@ -1343,6 +1570,7 @@ struct RootGridMetrics: Equatable, Sendable {
         order.removeAll { $0 == folderID || replacements.contains($0) }
         order.insert(contentsOf: replacements, at: min(insertion, order.count))
         rootOrder = order
+        clearReorderDragState()
     }
     private func replaceOrderItems(_ removed: [String], with newID: String, in existingOrder: [String]) {
         var order = existingOrder
@@ -1403,6 +1631,34 @@ struct RootGridMetrics: Equatable, Sendable {
     nonisolated static func referenceDefaultIconSize(pageWidth: Double) -> Double {
         guard pageWidth.isFinite, pageWidth > 0 else { return 92 }
         return min(max(pageWidth * 0.065, 72), 112)
+    }
+
+    nonisolated static func iconHasOpaqueCorners(_ icon: NSImage) -> Bool {
+        guard let cgImage = icon.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            return false
+        }
+        let side = 24
+        guard let context = CGContext(
+            data: nil,
+            width: side,
+            height: side,
+            bitsPerComponent: 8,
+            bytesPerRow: side * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return false }
+        context.interpolationQuality = .none
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: side, height: side))
+        guard let data = context.data else { return false }
+        let pixels = data.assumingMemoryBound(to: UInt8.self)
+        func isCornerOpaque(_ x: Int, _ y: Int) -> Bool {
+            pixels[(y * side + x) * 4 + 3] >= 246
+        }
+        let inset = 2
+        return isCornerOpaque(inset, inset)
+            && isCornerOpaque(side - 1 - inset, inset)
+            && isCornerOpaque(inset, side - 1 - inset)
+            && isCornerOpaque(side - 1 - inset, side - 1 - inset)
     }
 
     nonisolated static func sanitizedBackground(_ value: String) -> String {

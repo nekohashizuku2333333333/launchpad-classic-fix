@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import ImageIO
+import CryptoKit
 import Darwin
 
 enum LauncherMemoryPolicy {
@@ -304,17 +305,27 @@ actor LauncherFileOperator {
 
 actor LauncherIconLoader {
     private static let renderedPixelSize = LauncherMemoryPolicy.iconPixelSize
+    private static let pngMagicBytes: [UInt8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
+    private static let maximumDiskCacheEntries = 512
+    private static let diskCacheSweepTrigger = 128
+    private static let diskCacheAgeLimit: TimeInterval = 60 * 24 * 3_600
     private let cache: NSCache<NSString, NSData> = {
         let cache = NSCache<NSString, NSData>()
         cache.countLimit = LauncherMemoryPolicy.iconDataCacheCount
         cache.totalCostLimit = LauncherMemoryPolicy.iconDataCacheCost
         return cache
     }()
+    private var writesSinceSweep = 0
+    private var didPerformInitialSweep = false
 
     func iconData(for url: URL) -> Data? {
         let standardizedURL = url.standardizedFileURL
         let key = standardizedURL.path as NSString
         if let cached = cache.object(forKey: key) { return cached as Data }
+        if let diskData = Self.readDiskIcon(for: standardizedURL) {
+            cache.setObject(diskData as NSData, forKey: key, cost: diskData.count)
+            return diskData
+        }
         let iconData: Data?
         if let bundleIcon = Self.bundleIcon(for: standardizedURL),
            let normalizedBundleIconData = Self.normalizedIconData(bundleIcon) {
@@ -325,11 +336,105 @@ actor LauncherIconLoader {
         }
         guard !Task.isCancelled, let iconData else { return nil }
         cache.setObject(iconData as NSData, forKey: key, cost: iconData.count)
+        Self.writeDiskIcon(iconData, for: standardizedURL)
+        registerDiskWrite()
         return iconData
     }
 
     func removeAllCachedIcons() {
         cache.removeAllObjects()
+    }
+
+    private func registerDiskWrite() {
+        if !didPerformInitialSweep {
+            didPerformInitialSweep = true
+            Self.sweepDiskCache()
+            return
+        }
+        writesSinceSweep += 1
+        guard writesSinceSweep >= Self.diskCacheSweepTrigger else { return }
+        writesSinceSweep = 0
+        Self.sweepDiskCache()
+    }
+
+    private static func diskCacheDirectory() -> URL? {
+        guard let base = FileManager.default.urls(
+            for: .cachesDirectory,
+            in: .userDomainMask
+        ).first else { return nil }
+        let directory = base.appendingPathComponent(
+            "jp.local.launchpadclassic27.iconcache",
+            isDirectory: true
+        )
+        do {
+            try FileManager.default.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true
+            )
+            return directory
+        } catch {
+            return nil
+        }
+    }
+
+    private static func diskCacheURL(for appURL: URL) -> URL? {
+        guard let directory = diskCacheDirectory(),
+              let modificationDate = bundleModificationDate(appURL) else { return nil }
+        let identity = appURL.path + "\n" + String(Int64(modificationDate.timeIntervalSince1970))
+        let digest = SHA256.hash(data: Data(identity.utf8))
+        let fileName = digest.map { String(format: "%02x", $0) }.joined() + ".png"
+        return directory.appendingPathComponent(fileName, isDirectory: false)
+    }
+
+    private static func bundleModificationDate(_ url: URL) -> Date? {
+        guard let values = try? url.resourceValues(
+            forKeys: [.contentModificationDateKey]
+        ) else { return nil }
+        return values.contentModificationDate
+    }
+
+    private static func readDiskIcon(for appURL: URL) -> Data? {
+        guard let cacheURL = diskCacheURL(for: appURL),
+              let data = try? Data(contentsOf: cacheURL, options: .mappedIfSafe),
+              data.count > 32,
+              Array(data.prefix(8)) == pngMagicBytes else { return nil }
+        try? FileManager.default.setAttributes(
+            [.modificationDate: Date()],
+            ofItemAtPath: cacheURL.path
+        )
+        return data
+    }
+
+    private static func writeDiskIcon(_ data: Data, for appURL: URL) {
+        guard let cacheURL = diskCacheURL(for: appURL) else { return }
+        try? data.write(to: cacheURL, options: .atomic)
+    }
+
+    private static func sweepDiskCache() {
+        guard let directory = diskCacheDirectory(),
+              let entries = try? FileManager.default.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
+                options: [.skipsHiddenFiles]
+              ) else { return }
+        let cutoff = Date().addingTimeInterval(-diskCacheAgeLimit)
+        var items: [(url: URL, date: Date)] = []
+        for entry in entries where entry.pathExtension.lowercased() == "png" {
+            guard let values = try? entry.resourceValues(
+                forKeys: [.contentModificationDateKey, .isRegularFileKey]
+            ), values.isRegularFile == true,
+                  let date = values.contentModificationDate else { continue }
+            if date < cutoff {
+                try? FileManager.default.removeItem(at: entry)
+                continue
+            }
+            items.append((entry, date))
+        }
+        guard items.count > maximumDiskCacheEntries else { return }
+        let removalCount = items.count - maximumDiskCacheEntries
+        for item in items.sorted(by: { $0.date < $1.date }).prefix(removalCount) {
+            try? FileManager.default.removeItem(at: item.url)
+        }
     }
 
     private nonisolated static func bundleIcon(for appURL: URL) -> NSImage? {

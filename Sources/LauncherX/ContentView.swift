@@ -1,6 +1,22 @@
 import SwiftUI
 import AppKit
 
+enum LaunchpadSearchFieldMetrics {
+    static let topPadding = 80.0
+    static let capsuleHeight = 34.0
+    static var pagerTopOffset: Double { topPadding + capsuleHeight }
+}
+
+struct LauncherDisplayEntry: Identifiable {
+    let id: String
+    let entry: LauncherEntry?
+}
+
+struct FolderDisplayEntry: Identifiable {
+    let id: String
+    let app: AppItem?
+}
+
 struct ContentView: View {
     @EnvironmentObject var model: LauncherModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -18,7 +34,7 @@ struct ContentView: View {
                     .onTapGesture { model.dismissLauncher() }
                 ScrollWheelMonitor { model.navigateVisiblePages(by: $0) }
                 VStack(spacing: 0) {
-                    searchField.padding(.top, 80)
+                    searchField.padding(.top, LaunchpadSearchFieldMetrics.topPadding)
                     PagedAppGrid()
                 }
                 if let group = model.group(for: model.openGroupID) {
@@ -118,7 +134,7 @@ struct ContentView: View {
             }
             LauncherSettingsMenu()
         }
-        .padding(.leading, 12).padding(.trailing, 6).frame(height: 34)
+        .padding(.leading, 12).padding(.trailing, 6).frame(height: LaunchpadSearchFieldMetrics.capsuleHeight)
         .launchpadGlass(
             in: Capsule(),
             interactive: true,
@@ -393,7 +409,7 @@ struct PagedAppGrid: View {
 struct RootPagerCanvas: View {
     @EnvironmentObject var model: LauncherModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @GestureState private var dragOffset: CGFloat = 0
+    @State private var dragOffset: CGFloat = 0
     let allEntries: [LauncherEntry]
     let pageCount: Int
     let pageSize: Int
@@ -421,7 +437,16 @@ struct RootPagerCanvas: View {
                     )
                     .dropDestination(for: String.self) { items, _ in
                         guard let sourceID = items.first else { return false }
-                        model.reorderToPageEnd(sourceID, page: activePage, pageSize: pageSize)
+                        if let preview = model.reorderPreview, model.openGroupID == nil {
+                            model.reorderToSlot(
+                                sourceID,
+                                page: preview.page,
+                                slot: preview.slot,
+                                pageSize: pageSize
+                            )
+                        } else {
+                            model.reorderToPageEnd(sourceID, page: activePage, pageSize: pageSize)
+                        }
                         return true
                     }
 
@@ -433,8 +458,16 @@ struct RootPagerCanvas: View {
                     id: \.self
                 ) { page in
                     LazyVGrid(columns: columns, alignment: .center, spacing: RootGridMetrics.rowSpacing) {
-                        ForEach(entries(on: page)) { entry in
-                            EntryTile(entry: entry, iconSize: metrics.iconSize)
+                        ForEach(displayEntries(on: page)) { display in
+                            if let entry = display.entry {
+                                EntryTile(entry: entry, iconSize: metrics.iconSize)
+                            } else {
+                                Color.clear
+                                    .frame(
+                                        width: metrics.iconSize,
+                                        height: metrics.iconSize + RootGridMetrics.labelHeight
+                                    )
+                            }
                         }
                     }
                     .padding(.horizontal, metrics.horizontalPadding)
@@ -443,6 +476,14 @@ struct RootPagerCanvas: View {
                     .animation(
                         reduceMotion ? nil : .easeInOut(duration: 0.24),
                         value: Array(entries(on: page)).map(\.id)
+                    )
+                    .animation(
+                        reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.85),
+                        value: model.reorderPreview
+                    )
+                    .animation(
+                        reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.85),
+                        value: model.reorderDragSourceID
                     )
                     .transition(reduceMotion ? .opacity : .identity)
                     .id(reduceMotion ? "reduced-\(page)-\(model.pageSwapGeneration)" : "\(page)")
@@ -455,7 +496,37 @@ struct RootPagerCanvas: View {
                 }
             }
             .clipped()
+            .onAppear { reportLayout(size: pagerGeometry.size) }
+            .onChange(of: pagerGeometry.size) { _, size in reportLayout(size: size) }
+            .onChange(of: metrics) { _, _ in reportLayout(size: pagerGeometry.size) }
+            .onChange(of: pageSize) { _, _ in reportLayout(size: pagerGeometry.size) }
         }
+    }
+
+    private func reportLayout(size: CGSize) {
+        model.updateRootPagerLayout(
+            topOffset: LaunchpadSearchFieldMetrics.pagerTopOffset,
+            size: size,
+            metrics: metrics,
+            pageSize: pageSize
+        )
+    }
+
+    private func displayEntries(on page: Int) -> [LauncherDisplayEntry] {
+        let pageEntries = Array(entries(on: page))
+        let sourceID = model.reorderDragSourceID
+        var result = pageEntries
+            .filter { $0.id != sourceID }
+            .map { LauncherDisplayEntry(id: $0.id, entry: $0) }
+        if let sourceID, model.openGroupID == nil,
+           let preview = model.reorderPreview,
+           preview.sourceID == sourceID, preview.page == page {
+            result.insert(
+                LauncherDisplayEntry(id: "reorder-gap", entry: nil),
+                at: min(max(0, preview.slot), result.count)
+            )
+        }
+        return result
     }
 
     private func entries(on page: Int) -> ArraySlice<LauncherEntry> {
@@ -466,7 +537,7 @@ struct RootPagerCanvas: View {
 
     private func pageDragGesture(pageWidth: CGFloat) -> some Gesture {
         DragGesture(minimumDistance: 4)
-            .updating($dragOffset) { value, offset, transaction in
+            .onChanged { value in
                 let horizontal = value.translation.width
                 let vertical = value.translation.height
                 guard abs(horizontal) > abs(vertical) else { return }
@@ -474,8 +545,7 @@ struct RootPagerCanvas: View {
                 let isPastLastPage = model.currentPage == pageCount - 1 && horizontal < 0
                 let resistance: CGFloat = (isPastFirstPage || isPastLastPage) ? 0.22 : 1
                 let limit = pageWidth * 0.42
-                transaction.disablesAnimations = true
-                offset = min(max(horizontal * resistance, -limit), limit)
+                dragOffset = min(max(horizontal * resistance, -limit), limit)
             }
             .onEnded { value in
                 let horizontal = value.translation.width
@@ -486,14 +556,28 @@ struct RootPagerCanvas: View {
                     projectedTranslation: projected,
                     pageWidth: pageWidth
                 )
-                guard abs(horizontal) > abs(vertical) else { return }
 
                 let threshold = max(72, pageWidth * LaunchpadPageMotion.pageDecisionRatio)
-                guard abs(horizontal) >= threshold || abs(projected) >= threshold else { return }
-
+                let shouldChangePage = abs(horizontal) > abs(vertical)
+                    && (abs(horizontal) >= threshold || abs(projected) >= threshold)
                 let directionSource = abs(projected) >= abs(horizontal) ? projected : horizontal
-                let pageDelta = directionSource < 0 ? 1 : -1
-                model.changePage(by: pageDelta, initialVelocity: animationVelocity)
+
+                if shouldChangePage {
+                    let delta = directionSource < 0 ? 1 : -1
+                    if reduceMotion {
+                        dragOffset = 0
+                        model.changePage(by: delta)
+                    } else {
+                        withAnimation(LaunchpadPageMotion.animation(initialVelocity: animationVelocity)) {
+                            dragOffset = 0
+                            model.setCurrentPage(model.currentPage + delta)
+                        }
+                    }
+                } else {
+                    withAnimation(reduceMotion ? nil : LaunchpadPageMotion.animation()) {
+                        dragOffset = 0
+                    }
+                }
             }
     }
 }
@@ -566,7 +650,7 @@ struct EntryTile: View {
                 }
             }
             .onDrag {
-                model.startReorderDrag()
+                model.startReorderDrag(entry.id)
                 return NSItemProvider(object: entry.id as NSString)
             }
             .dropDestination(for: String.self) { items, _ in
@@ -671,10 +755,13 @@ struct ApplicationArtwork: View {
             : model.cachedIcon(for: app)
         Group {
             if let icon = preparedIcon {
-                Image(nsImage: icon)
-                    .interpolation(.high)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
+                if model.iconNeedsRoundedCorners(for: app) {
+                    renderedIcon(icon).clipShape(
+                        RoundedRectangle(cornerRadius: max(2, size * 0.2245), style: .continuous)
+                    )
+                } else {
+                    renderedIcon(icon)
+                }
             } else {
                 RoundedRectangle(cornerRadius: max(4, size * 0.2))
                     .fill(.thinMaterial)
@@ -696,6 +783,13 @@ struct ApplicationArtwork: View {
             guard !Task.isCancelled, model.isLauncherVisible else { return }
             state.finishLoading(loadedIcon, appID: app.id)
         }
+    }
+
+    private func renderedIcon(_ icon: NSImage) -> some View {
+        Image(nsImage: icon)
+            .interpolation(.high)
+            .resizable()
+            .aspectRatio(contentMode: .fit)
     }
 }
 
@@ -731,24 +825,64 @@ struct FolderOverlay: View {
     @EnvironmentObject var model: LauncherModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let group: AppGroup
+
+    private struct Layout {
+        let metrics: FolderGridMetrics
+        let capacity: Int
+        let pageCount: Int
+        let panelWidth: CGFloat
+        let columns: [GridItem]
+        let gridOrigin: CGPoint
+    }
+
+    private func makeLayout(containerSize: CGSize) -> Layout {
+        let folderApps = model.apps(in: group)
+        let metrics = FolderGridMetrics.calculate(
+            containerWidth: containerSize.width,
+            containerHeight: containerSize.height,
+            iconSize: model.iconSize,
+            itemCount: folderApps.count
+        )
+        let availablePanelWidth = max(360, containerSize.width - 48)
+        let panelWidth = min(availablePanelWidth, max(560, CGFloat(metrics.gridWidth) + 140))
+        let columns = Array(
+            repeating: GridItem(.fixed(CGFloat(metrics.cellWidth)), spacing: 20, alignment: .top),
+            count: metrics.columnCount
+        )
+        let panelOriginX = (containerSize.width - panelWidth) / 2
+        let panelOriginY = (containerSize.height - CGFloat(metrics.panelHeight)) / 2
+        let gridOrigin = CGPoint(
+            x: panelOriginX + 70,
+            y: panelOriginY + FolderGridMetrics.verticalPadding
+                + FolderGridMetrics.headerHeight + FolderGridMetrics.sectionSpacing
+        )
+        return Layout(
+            metrics: metrics,
+            capacity: metrics.capacity,
+            pageCount: metrics.pageCount,
+            panelWidth: panelWidth,
+            columns: columns,
+            gridOrigin: gridOrigin
+        )
+    }
+
+    private func reportFolderLayout(_ layout: Layout) {
+        model.updateFolderPagerLayout(
+            origin: layout.gridOrigin,
+            cellWidth: layout.metrics.cellWidth,
+            columnCount: layout.metrics.columnCount,
+            capacity: layout.capacity,
+            columnSpacing: 20,
+            rowSpacing: FolderGridMetrics.rowSpacing,
+            itemHeight: model.iconSize + 24
+        )
+    }
+
     var body: some View {
         GeometryReader { geometry in
+            let layout = makeLayout(containerSize: geometry.size)
             let folderApps = model.apps(in: group)
-            let metrics = FolderGridMetrics.calculate(
-                containerWidth: geometry.size.width,
-                containerHeight: geometry.size.height,
-                iconSize: model.iconSize,
-                itemCount: folderApps.count
-            )
-            let capacity = metrics.capacity
-            let pageCount = metrics.pageCount
-            let availablePanelWidth = max(360, geometry.size.width - 48)
-            let panelWidth = min(availablePanelWidth, max(560, CGFloat(metrics.gridWidth) + 140))
-            let columnSpacing: CGFloat = 20
-            let columns = Array(
-                repeating: GridItem(.fixed(CGFloat(metrics.cellWidth)), spacing: columnSpacing, alignment: .top),
-                count: metrics.columnCount
-            )
+            let metrics = layout.metrics
 
             ZStack {
                 Color.black.opacity(0.34).ignoresSafeArea()
@@ -765,25 +899,25 @@ struct FolderOverlay: View {
                     FolderPagerCanvas(
                         group: group,
                         folderApps: folderApps,
-                        capacity: capacity,
-                        pageCount: pageCount,
-                        columns: columns,
+                        capacity: layout.capacity,
+                        pageCount: layout.pageCount,
+                        columns: layout.columns,
                         gridWidth: CGFloat(metrics.gridWidth),
-                        pageWidth: panelWidth
+                        pageWidth: layout.panelWidth
                     )
                     .frame(height: CGFloat(metrics.gridHeight), alignment: .top)
                     .clipped()
 
-                    if pageCount > 1 {
+                    if layout.pageCount > 1 {
                         LaunchpadPageIndicator(
-                            pageCount: pageCount,
-                            currentPage: min(model.folderPage, pageCount - 1),
+                            pageCount: layout.pageCount,
+                            currentPage: min(model.folderPage, layout.pageCount - 1),
                             onSelect: { model.goToFolderPage($0) }
                         )
                     }
                 }
                 .padding(.horizontal, 70).padding(.vertical, 18)
-                .frame(width: panelWidth)
+                .frame(width: layout.panelWidth)
                 .frame(height: CGFloat(metrics.panelHeight), alignment: .top)
                 .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
                 .launchpadGlass(
@@ -803,8 +937,13 @@ struct FolderOverlay: View {
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             }
-            .onAppear { model.setFolderPageCount(pageCount) }
-            .onChange(of: pageCount) { _, count in model.setFolderPageCount(count) }
+            .onAppear { model.setFolderPageCount(layout.pageCount) }
+            .onChange(of: layout.pageCount) { _, count in model.setFolderPageCount(count) }
+            .onAppear { reportFolderLayout(layout) }
+            .onChange(of: geometry.size) { _, size in
+                reportFolderLayout(makeLayout(containerSize: size))
+            }
+            .onChange(of: layout.metrics) { _, _ in reportFolderLayout(layout) }
         }
     }
 }
@@ -1061,7 +1200,7 @@ final class FolderRenamePanelCoordinator: NSObject, ObservableObject, NSWindowDe
 struct FolderPagerCanvas: View {
     @EnvironmentObject var model: LauncherModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @GestureState private var dragOffset: CGFloat = 0
+    @State private var dragOffset: CGFloat = 0
     let group: AppGroup
     let folderApps: [AppItem]
     let capacity: Int
@@ -1077,11 +1216,19 @@ struct FolderPagerCanvas: View {
                 .gesture(pageDragGesture)
                 .dropDestination(for: String.self) { items, _ in
                     guard let sourceID = items.first else { return false }
-                    model.reorderInOpenGroupToPageEnd(
-                        sourceID,
-                        page: min(model.folderPage, pageCount - 1),
-                        capacity: capacity
-                    )
+                    if let preview = model.reorderPreview, model.openGroupID != nil {
+                        model.reorderInOpenGroupToSlot(
+                            sourceID,
+                            slot: preview.slot,
+                            capacity: capacity
+                        )
+                    } else {
+                        model.reorderInOpenGroupToPageEnd(
+                            sourceID,
+                            page: min(model.folderPage, pageCount - 1),
+                            capacity: capacity
+                        )
+                    }
                     return true
                 }
 
@@ -1094,7 +1241,7 @@ struct FolderPagerCanvas: View {
             ) { page in
                 FolderAppGrid(
                     group: group,
-                    apps: Array(apps(on: page)),
+                    displayApps: displayApps(on: page),
                     columns: columns,
                     gridWidth: gridWidth
                 )
@@ -1110,9 +1257,26 @@ struct FolderPagerCanvas: View {
         }
     }
 
+    private func displayApps(on page: Int) -> [FolderDisplayEntry] {
+        let pageApps = Array(apps(on: page))
+        let sourceID = model.reorderDragSourceID
+        var result = pageApps
+            .filter { $0.id != sourceID }
+            .map { FolderDisplayEntry(id: $0.id, app: $0) }
+        if let sourceID,
+           let preview = model.reorderPreview,
+           preview.sourceID == sourceID, preview.page == page {
+            result.insert(
+                FolderDisplayEntry(id: "reorder-gap", app: nil),
+                at: min(max(0, preview.slot), result.count)
+            )
+        }
+        return result
+    }
+
     private var pageDragGesture: some Gesture {
         DragGesture(minimumDistance: 4)
-            .updating($dragOffset) { value, offset, transaction in
+            .onChanged { value in
                 let horizontal = value.translation.width
                 let vertical = value.translation.height
                 guard abs(horizontal) > abs(vertical) else { return }
@@ -1120,25 +1284,38 @@ struct FolderPagerCanvas: View {
                 let isPastLastPage = model.folderPage == pageCount - 1 && horizontal < 0
                 let resistance: CGFloat = (isPastFirstPage || isPastLastPage) ? 0.22 : 1
                 let limit = pageWidth * 0.42
-                transaction.disablesAnimations = true
-                offset = min(max(horizontal * resistance, -limit), limit)
+                dragOffset = min(max(horizontal * resistance, -limit), limit)
             }
             .onEnded { value in
                 let horizontal = value.translation.width
                 let vertical = value.translation.height
                 let projected = value.predictedEndTranslation.width
-                guard abs(horizontal) > abs(vertical),
-                      abs(horizontal) >= 42 || abs(projected) >= 110 else { return }
-                let directionSource = abs(projected) >= abs(horizontal) ? projected : horizontal
                 let animationVelocity = LaunchpadPageMotion.normalizedInitialVelocity(
                     translation: horizontal,
                     projectedTranslation: projected,
                     pageWidth: pageWidth
                 )
-                model.goToFolderPage(
-                    model.folderPage + (directionSource < 0 ? 1 : -1),
-                    initialVelocity: animationVelocity
-                )
+
+                let shouldChangePage = abs(horizontal) > abs(vertical)
+                    && (abs(horizontal) >= 42 || abs(projected) >= 110)
+                let directionSource = abs(projected) >= abs(horizontal) ? projected : horizontal
+                let delta = directionSource < 0 ? 1 : -1
+
+                if shouldChangePage {
+                    if reduceMotion {
+                        dragOffset = 0
+                        model.goToFolderPage(model.folderPage + delta)
+                    } else {
+                        withAnimation(LaunchpadPageMotion.animation(initialVelocity: animationVelocity)) {
+                            dragOffset = 0
+                            model.folderPage = min(max(0, model.folderPage + delta), pageCount - 1)
+                        }
+                    }
+                } else {
+                    withAnimation(reduceMotion ? nil : LaunchpadPageMotion.animation()) {
+                        dragOffset = 0
+                    }
+                }
             }
     }
 
@@ -1152,16 +1329,30 @@ struct FolderPagerCanvas: View {
 struct FolderAppGrid: View {
     @EnvironmentObject var model: LauncherModel
     let group: AppGroup
-    let apps: [AppItem]
+    let displayApps: [FolderDisplayEntry]
     let columns: [GridItem]
     let gridWidth: CGFloat
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         LazyVGrid(columns: columns, alignment: .leading, spacing: 20) {
-            ForEach(apps) { app in
-                FolderAppTile(group: group, app: app)
+            ForEach(displayApps) { display in
+                if let app = display.app {
+                    FolderAppTile(group: group, app: app)
+                } else {
+                    Color.clear
+                        .frame(width: model.iconSize, height: model.iconSize + 24)
+                }
             }
         }
+        .animation(
+            reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.85),
+            value: model.reorderPreview
+        )
+        .animation(
+            reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.85),
+            value: model.reorderDragSourceID
+        )
         .frame(width: gridWidth, alignment: .topLeading)
         .frame(maxHeight: .infinity, alignment: .topLeading)
     }
@@ -1177,7 +1368,7 @@ struct FolderAppTile: View {
             .contentShape(Rectangle())
             .onTapGesture { model.launch(app) }
             .onDrag {
-                model.startReorderDrag()
+                model.startReorderDrag(app.id)
                 return NSItemProvider(object: app.id as NSString)
             }
             .dropDestination(for: String.self) { items, _ in
