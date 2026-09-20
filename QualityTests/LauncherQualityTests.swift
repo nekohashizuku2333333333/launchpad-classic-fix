@@ -410,9 +410,9 @@ struct LauncherQualityTests {
         model.setFolderPageCount(4)
         model.openGroupID = UUID()
         model.navigateVisiblePages(by: Int.max)
-        try require(model.folderPage == 3, "Positive folder-page overflow was not clamped")
+        try require(model.folderPager.page == 3, "Positive folder-page overflow was not clamped")
         model.navigateVisiblePages(by: Int.min)
-        try require(model.folderPage == 0, "Negative folder-page overflow was not clamped")
+        try require(model.folderPager.page == 0, "Negative folder-page overflow was not clamped")
     }
 
     private static func modalUIBlocksBackgroundPageNavigation() throws {

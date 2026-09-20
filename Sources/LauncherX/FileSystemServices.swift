@@ -128,8 +128,8 @@ actor LauncherFileScanner {
               isDirectory.boolValue else { return }
 
         let deduplicationPath = resolvedURL.path
-        guard found[deduplicationPath] == nil else { return }
         let bundle = Bundle(url: standardizedURL)
+        guard found[deduplicationPath] == nil, !isLauncherSelf(url: standardizedURL, bundle: bundle) else { return }
         let category = bundle?.object(forInfoDictionaryKey: "LSApplicationCategoryType") as? String
         let receipt = standardizedURL.appendingPathComponent("Contents/_MASReceipt/receipt").path
         let isSystemApp = resolvedURL.path.hasPrefix("/System/")
@@ -143,25 +143,27 @@ actor LauncherFileScanner {
         )
     }
 
-    /// Resolves the application name exactly as Finder displays it in
-    /// /Applications: the localized bundle display name first, then the
-    /// bundle name, then the Finder display name, and finally the file name.
-    nonisolated private static func localizedApplicationName(bundle: Bundle?, url: URL) -> String? {
-        if let localized = bundle?.localizedInfoDictionary {
-            if let name = sanitizedDisplayName(localized["CFBundleDisplayName"] as? String) {
-                return name
-            }
-            if let name = sanitizedDisplayName(localized["CFBundleName"] as? String) {
-                return name
-            }
+    /// The launcher itself must never appear in its own application grid.
+    nonisolated private static func isLauncherSelf(url: URL, bundle: Bundle?) -> Bool {
+        let main = Bundle.main
+        if let identifier = bundle?.bundleIdentifier,
+           let mainIdentifier = main.bundleIdentifier,
+           identifier == mainIdentifier {
+            return true
         }
-        if let info = bundle?.infoDictionary {
-            if let name = sanitizedDisplayName(info["CFBundleDisplayName"] as? String) {
-                return name
-            }
-            if let name = sanitizedDisplayName(info["CFBundleName"] as? String) {
-                return name
-            }
+        return url.standardizedFileURL.path == main.bundleURL.standardizedFileURL.path
+    }
+
+    /// Resolves the application name exactly as Finder displays it in
+    /// /Applications. Finder honors the *localized* bundle display name
+    /// (InfoPlist.strings); a non-localized CFBundleDisplayName is ignored
+    /// (e.g. OBS.app), so the Finder display name is the authoritative
+    /// fallback. CFBundleName is never shown by Finder.
+    nonisolated private static func localizedApplicationName(bundle: Bundle?, url: URL) -> String? {
+        if let localized = sanitizedDisplayName(
+            bundle?.localizedInfoDictionary?["CFBundleDisplayName"] as? String
+        ) {
+            return localized
         }
         if var finderName = sanitizedDisplayName(FileManager.default.displayName(atPath: url.path)) {
             if finderName.lowercased().hasSuffix(".app"), finderName.count > 4 {

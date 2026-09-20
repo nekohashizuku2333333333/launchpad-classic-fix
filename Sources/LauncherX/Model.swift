@@ -195,6 +195,16 @@ enum LauncherWindowPresentation {
     }
 }
 
+/// Folder paging lives in its own observable so that flipping pages inside
+/// an open folder does not invalidate (and re-render) the root Launchpad
+/// grid, which would stutter the page-slide and split animations.
+@MainActor
+final class FolderPagerState: ObservableObject {
+    @Published var page = 0
+    @Published var displayedPage = 0
+    @Published var pageCount = 1
+}
+
 @MainActor final class LauncherModel: ObservableObject {
     static let defaultBackground = "wallpaper"
 
@@ -210,8 +220,11 @@ enum LauncherWindowPresentation {
     @Published var openGroupID: UUID?
     @Published var currentPage = 0
     @Published var pageCount = 1
-    @Published var folderPage = 0
-    @Published var folderPageCount = 1
+    @Published private(set) var reducedMotionPageHidden = false
+    @Published private(set) var displayedPage = 0
+    @Published private(set) var reorderPreview: LauncherReorderPreview?
+    @Published private(set) var reorderDragSourceID: String?
+    let folderPager = FolderPagerState()
     @Published var rootOrder: [String] = [] { didSet { saveOrder() } }
     @Published var wallpapers: [WallpaperItem] = []
     @Published private(set) var selectedBackgroundImage: NSImage?
@@ -243,11 +256,6 @@ enum LauncherWindowPresentation {
     } }
     @Published private(set) var reducesTransparency =
         NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
-    @Published private(set) var reducedMotionPageHidden = false
-    @Published private(set) var displayedPage = 0
-    @Published private(set) var displayedFolderPage = 0
-    @Published private(set) var reorderPreview: LauncherReorderPreview?
-    @Published private(set) var reorderDragSourceID: String?
 
     private let groupsKey = "launcher.groups.v2"
     private let orderKey = "launcher.order.v1"
@@ -502,7 +510,7 @@ enum LauncherWindowPresentation {
 
     func open(_ group: AppGroup) {
         guard groups.contains(where: { $0.id == group.id }) else { return }
-        folderPage = 0
+        folderPager.page = 0
         openGroupID = group.id
     }
     func dismissLauncher(animated: Bool = true) {
@@ -547,9 +555,9 @@ enum LauncherWindowPresentation {
     }
     func closeFolder() {
         openGroupID = nil
-        folderPage = 0
-        displayedFolderPage = 0
-        folderPageCount = 1
+        folderPager.page = 0
+        folderPager.displayedPage = 0
+        folderPager.pageCount = 1
     }
     func group(for id: UUID?) -> AppGroup? { groups.first { $0.id == id } }
 
@@ -618,27 +626,27 @@ enum LauncherWindowPresentation {
     }
 
     func setFolderPageCount(_ count: Int) {
-        folderPageCount = max(1, count)
-        folderPage = min(folderPage, folderPageCount - 1)
-        displayedFolderPage = min(displayedFolderPage, folderPageCount - 1)
+        folderPager.pageCount = max(1, count)
+        folderPager.page = min(folderPager.page, folderPager.pageCount - 1)
+        folderPager.displayedPage = min(folderPager.displayedPage, folderPager.pageCount - 1)
     }
 
     func setFolderPage(_ page: Int) {
-        let clamped = min(max(0, page), folderPageCount - 1)
-        folderPage = clamped
-        displayedFolderPage = clamped
+        let clamped = min(max(0, page), folderPager.pageCount - 1)
+        folderPager.page = clamped
+        folderPager.displayedPage = clamped
     }
 
     func goToFolderPage(_ page: Int, initialVelocity: Double = 0) {
-        let destination = min(max(0, page), folderPageCount - 1)
-        guard destination != folderPage else { return }
+        let destination = min(max(0, page), folderPager.pageCount - 1)
+        guard destination != folderPager.page else { return }
         if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
-            folderPage = destination
-            animateReducedMotionPageSwap { self.displayedFolderPage = destination }
+            folderPager.page = destination
+            animateReducedMotionPageSwap { self.folderPager.displayedPage = destination }
         } else {
             withAnimation(LaunchpadPageMotion.animation(initialVelocity: initialVelocity)) {
-                folderPage = destination
-                displayedFolderPage = destination
+                folderPager.page = destination
+                folderPager.displayedPage = destination
             }
         }
     }
@@ -665,7 +673,7 @@ enum LauncherWindowPresentation {
         guard !showLauncherSettings, pendingDeleteApp == nil, errorMessage == nil else { return }
         if openGroupID == nil { changePage(by: delta) }
         else {
-            let addition = folderPage.addingReportingOverflow(delta)
+            let addition = folderPager.page.addingReportingOverflow(delta)
             goToFolderPage(addition.overflow ? (delta > 0 ? Int.max : Int.min) : addition.partialValue)
         }
     }
@@ -811,7 +819,7 @@ enum LauncherWindowPresentation {
         let sourcePath = String(sourceID.dropFirst(4))
         let paths = groups[index].appPaths
         guard paths.contains(sourcePath) else { return }
-        let pageStart = min(folderPage * capacity, paths.count)
+        let pageStart = min(folderPager.page * capacity, paths.count)
         let pageEnd = min(pageStart + capacity, paths.count)
         let pagePaths = Array(paths[pageStart..<pageEnd])
         groups[index].appPaths.removeAll { $0 == sourcePath }
@@ -999,7 +1007,7 @@ enum LauncherWindowPresentation {
             return
         }
         let pageCount = max(1, Int(ceil(Double(group.appPaths.count) / Double(layout.capacity))))
-        let page = min(displayedFolderPage, pageCount - 1)
+        let page = min(folderPager.displayedPage, pageCount - 1)
         let pageStart = page * layout.capacity
         let countOnPage = min(layout.capacity, max(0, group.appPaths.count - pageStart))
         let slot = min(
@@ -1026,7 +1034,7 @@ enum LauncherWindowPresentation {
             guard search.isEmpty else { return }
             changePage(by: direction)
         } else {
-            goToFolderPage(folderPage + direction)
+            goToFolderPage(folderPager.page + direction)
         }
     }
 

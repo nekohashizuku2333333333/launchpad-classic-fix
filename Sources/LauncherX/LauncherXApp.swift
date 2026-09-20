@@ -98,6 +98,7 @@ final class LauncherAppDelegate: NSObject, NSApplicationDelegate {
         window.contentViewController = NSHostingController(
             rootView: ContentView()
                 .environmentObject(model)
+                .environmentObject(model.folderPager)
                 .frame(minWidth: 760, minHeight: 540)
         )
         LauncherWindowPresentation.configureChrome(of: window)

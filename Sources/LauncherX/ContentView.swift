@@ -159,7 +159,7 @@ struct ContentView: View {
         .animation(
             reduceMotion
                 ? .easeInOut(duration: LaunchpadPageMotion.reducedMotionDuration)
-                : .spring(response: 0.38, dampingFraction: 0.86),
+                : .spring(response: 0.42, dampingFraction: 0.9),
             value: model.openGroupID
         )
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.38), value: model.background)
@@ -793,31 +793,31 @@ struct RootPageRows: View {
                 }
                 .frame(width: metrics.gridWidth, height: metrics.cellHeight, alignment: .leading)
                 .offset(x: (pageWidth - metrics.gridWidth) / 2, y: rowYOffset(rowIndex))
-                .animation(
-                    reduceMotion
-                        ? .easeInOut(duration: 0.2)
-                        : .spring(response: 0.42, dampingFraction: 0.85),
-                    value: split
-                )
-                .animation(
-                    reduceMotion ? .easeInOut(duration: 0.18) : .easeInOut(duration: 0.24),
-                    value: displayEntries.map(\.id)
-                )
-                .animation(
-                    reduceMotion
-                        ? .easeInOut(duration: 0.18)
-                        : .spring(response: 0.3, dampingFraction: 0.85),
-                    value: model.reorderPreview
-                )
-                .animation(
-                    reduceMotion
-                        ? .easeInOut(duration: 0.18)
-                        : .spring(response: 0.3, dampingFraction: 0.85),
-                    value: model.reorderDragSourceID
-                )
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .animation(
+            reduceMotion
+                ? .easeInOut(duration: 0.2)
+                : .spring(response: 0.4, dampingFraction: 0.88),
+            value: split
+        )
+        .animation(
+            reduceMotion ? .easeInOut(duration: 0.18) : .easeInOut(duration: 0.24),
+            value: displayEntries.map(\.id)
+        )
+        .animation(
+            reduceMotion
+                ? .easeInOut(duration: 0.18)
+                : .spring(response: 0.3, dampingFraction: 0.85),
+            value: model.reorderPreview
+        )
+        .animation(
+            reduceMotion
+                ? .easeInOut(duration: 0.18)
+                : .spring(response: 0.3, dampingFraction: 0.85),
+            value: model.reorderDragSourceID
+        )
     }
 
     private func rowYOffset(_ rowIndex: Int) -> CGFloat {
@@ -1153,6 +1153,7 @@ struct FolderSplitLayer: View {
 
 struct FolderExpandedBand: View {
     @EnvironmentObject var model: LauncherModel
+    @EnvironmentObject var folderPager: FolderPagerState
     let split: FolderSplitState
     let canvasWidth: CGFloat
     let canvasHeight: CGFloat
@@ -1176,7 +1177,7 @@ struct FolderExpandedBand: View {
             if split.pageCount > 1 {
                 LaunchpadPageIndicator(
                     pageCount: split.pageCount,
-                    currentPage: min(model.folderPage, split.pageCount - 1),
+                    currentPage: min(folderPager.page, split.pageCount - 1),
                     onSelect: { model.goToFolderPage($0) }
                 )
                 .frame(height: FolderBandMetrics.indicatorHeight)
@@ -1198,7 +1199,6 @@ struct FolderExpandedBand: View {
         }
         .onChange(of: split.pageCount) { _, count in model.setFolderPageCount(count) }
         .onChange(of: split) { _, _ in reportFolderLayout() }
-        .onChange(of: model.folderPage) { _, _ in reportFolderLayout() }
     }
 
     /// A quiet translucent wash that reads as part of the page rather than a
@@ -1528,6 +1528,7 @@ final class FolderRenamePanelCoordinator: NSObject, ObservableObject, NSWindowDe
 
 struct FolderPagerCanvas: View {
     @EnvironmentObject var model: LauncherModel
+    @EnvironmentObject var folderPager: FolderPagerState
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var dragOffset: CGFloat = 0
     let group: AppGroup
@@ -1563,7 +1564,7 @@ struct FolderPagerCanvas: View {
                     } else {
                         model.reorderInOpenGroupToPageEnd(
                             sourceID,
-                            page: min(model.folderPage, pageCount - 1),
+                            page: min(folderPager.page, pageCount - 1),
                             capacity: capacity
                         )
                     }
@@ -1572,7 +1573,7 @@ struct FolderPagerCanvas: View {
 
             ForEach(
                 LaunchpadPageMotion.visiblePages(
-                    currentPage: model.displayedFolderPage,
+                    currentPage: folderPager.displayedPage,
                     pageCount: pageCount
                 ),
                 id: \.self
@@ -1585,10 +1586,10 @@ struct FolderPagerCanvas: View {
                 )
                 .frame(maxWidth: .infinity, alignment: .top)
                 .offset(
-                    x: CGFloat(page - min(model.displayedFolderPage, pageCount - 1)) * pageWidth
+                    x: CGFloat(page - min(folderPager.displayedPage, pageCount - 1)) * pageWidth
                         + dragOffset
                 )
-                .allowsHitTesting(page == model.displayedFolderPage)
+                .allowsHitTesting(page == folderPager.displayedPage)
                 .compositingGroup()
             }
         }
@@ -1618,8 +1619,8 @@ struct FolderPagerCanvas: View {
                 let horizontal = value.translation.width
                 let vertical = value.translation.height
                 guard abs(horizontal) > abs(vertical) else { return }
-                let isPastFirstPage = model.folderPage == 0 && horizontal > 0
-                let isPastLastPage = model.folderPage == pageCount - 1 && horizontal < 0
+                let isPastFirstPage = folderPager.page == 0 && horizontal > 0
+                let isPastLastPage = folderPager.page == pageCount - 1 && horizontal < 0
                 let resistance: CGFloat = (isPastFirstPage || isPastLastPage) ? 0.22 : 1
                 let limit = pageWidth * 0.42
                 dragOffset = min(max(horizontal * resistance, -limit), limit)
@@ -1642,11 +1643,11 @@ struct FolderPagerCanvas: View {
                 if shouldChangePage {
                     if reduceMotion {
                         dragOffset = 0
-                        model.goToFolderPage(model.folderPage + delta)
+                        model.goToFolderPage(folderPager.page + delta)
                     } else {
                         withAnimation(LaunchpadPageMotion.animation(initialVelocity: animationVelocity)) {
                             dragOffset = 0
-                            model.setFolderPage(model.folderPage + delta)
+                            model.setFolderPage(folderPager.page + delta)
                         }
                     }
                 } else {
