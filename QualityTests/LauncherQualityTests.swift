@@ -30,6 +30,7 @@ struct LauncherQualityTests {
             try dismissMotionMatchesReferenceApplication()
             try referenceIconSizingMatchesAttachedApp()
             try rootGridUsesAvailableScreenSpace()
+            try systemLanguageResolvesFinderStyleLocalizationOrder()
             try folderGridMetricsNeverOverflowTheirPanel()
             try pageWindowLimitsRenderedPages()
             try scannerGracefullyHandlesMissingRoots()
@@ -44,7 +45,7 @@ struct LauncherQualityTests {
             try await hiddenLauncherRetainsPreparedIconsForReopening()
             try applicationUpdatePreservesUserLayout()
             try await fileOperatorRejectsUnsafeDeleteLocation()
-            print("Launcher quality tests passed (32/32)")
+            print("Launcher quality tests passed (33/33)")
         } catch {
             FileHandle.standardError.write(Data("Launcher quality tests failed: \(error)\n".utf8))
             Darwin.exit(EXIT_FAILURE)
@@ -548,6 +549,64 @@ struct LauncherQualityTests {
         legacyContext.defaults.set(96, forKey: "iconSize")
         let migratedModel = LauncherModel(defaults: legacyContext.defaults, autoScan: false)
         try require(migratedModel.iconSize == 112, "The previous 96-point maximum was not migrated to 112 points")
+    }
+
+    private static func systemLanguageResolvesFinderStyleLocalizationOrder() throws {
+        // Hong Kong Traditional Chinese system: HK names outrank TW names.
+        let hkCandidates = LauncherFileScanner.localizationCandidates(
+            languageSetting: "system",
+            preferredLanguages: ["zh-Hant-HK", "yue-Hant-HK", "ja-HK"]
+        )
+        try require(
+            hkCandidates.first == "zh-Hant-HK" && hkCandidates.contains("zh_HK"),
+            "The HK system order did not start with Hong Kong localizations"
+        )
+        try require(
+            (hkCandidates.firstIndex(of: "zh_HK") ?? .max) < (hkCandidates.firstIndex(of: "zh_TW") ?? .min),
+            "The HK system order preferred Taiwan names over Hong Kong names"
+        )
+        try require(hkCandidates.contains("ja"), "The system order dropped secondary preferences")
+        try require(hkCandidates.last == "en", "The system order lacked an English fallback")
+
+        // Taiwan / generic Traditional Chinese.
+        let twCandidates = LauncherFileScanner.localizationCandidates(
+            languageSetting: "system",
+            preferredLanguages: ["zh-TW", "en"]
+        )
+        try require(
+            (twCandidates.firstIndex(of: "zh-Hant") ?? .max) < (twCandidates.firstIndex(of: "zh_TW") ?? .min),
+            "The TW system order did not prefer generic Traditional Chinese first"
+        )
+
+        // Simplified Chinese system follows simplified localizations.
+        let hansCandidates = LauncherFileScanner.localizationCandidates(
+            languageSetting: "system",
+            preferredLanguages: ["zh-Hans-CN"]
+        )
+        try require(
+            hansCandidates.contains("zh_CN") && !hansCandidates.contains("zh_TW"),
+            "The Simplified Chinese system order leaked Traditional localizations"
+        )
+
+        // Explicit settings override the system list.
+        let explicit = LauncherFileScanner.localizationCandidates(
+            languageSetting: "zh-Hant",
+            preferredLanguages: ["en"]
+        )
+        try require(
+            explicit.first == "zh-Hant" && !explicit.contains(where: { $0 == "en" && explicit.firstIndex(of: "en") == 0 }),
+            "The explicit language order did not take precedence"
+        )
+
+        // Any other system language still resolves generically.
+        let french = LauncherFileScanner.localizationCandidates(
+            languageSetting: "system",
+            preferredLanguages: ["fr-FR"]
+        )
+        try require(
+            french.contains("fr-fr") && french.contains("fr"),
+            "The generic system language order was not derived from the preference"
+        )
     }
 
     private static func rootGridUsesAvailableScreenSpace() throws {

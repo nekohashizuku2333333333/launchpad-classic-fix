@@ -240,6 +240,7 @@ final class FolderPagerState: ObservableObject {
         if cleaned != language { language = cleaned; return }
         defaults.set(language, forKey: "language")
         updateLocalizedSystemGroupNames()
+        if oldValue != language { scan() }
     } }
     @Published var background: String { didSet {
         let cleaned = Self.sanitizedBackground(background)
@@ -424,8 +425,15 @@ final class FolderPagerState: ObservableObject {
         isScanning = true
         let scanner = applicationScanner
         let homeDirectory = FileManager.default.homeDirectoryForCurrentUser
+        let localizations = LauncherFileScanner.localizationCandidates(
+            languageSetting: language,
+            preferredLanguages: Locale.preferredLanguages
+        )
         applicationScanTask = Task { [weak self] in
-            let result = await scanner.scanApplications(homeDirectory: homeDirectory)
+            let result = await scanner.scanApplications(
+                homeDirectory: homeDirectory,
+                preferredLocalizations: localizations
+            )
             guard !Task.isCancelled, let self else { return }
             self.applicationScanTask = nil
             self.isScanning = false

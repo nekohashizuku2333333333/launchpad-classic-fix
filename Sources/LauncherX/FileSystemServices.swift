@@ -41,8 +41,14 @@ actor LauncherFileScanner {
         ]
     }
 
-    func scanApplications(homeDirectory: URL) -> AppScanResult {
-        Self.scanApplications(in: Self.applicationRoots(homeDirectory: homeDirectory))
+    func scanApplications(
+        homeDirectory: URL,
+        preferredLocalizations: [String] = ["en"]
+    ) -> AppScanResult {
+        Self.scanApplications(
+            in: Self.applicationRoots(homeDirectory: homeDirectory),
+            preferredLocalizations: preferredLocalizations
+        )
     }
 
     func scanWallpapers() -> [WallpaperItem] {
@@ -53,7 +59,10 @@ actor LauncherFileScanner {
         return Self.scanWallpapers(in: roots)
     }
 
-    nonisolated static func scanApplications(in roots: [URL]) -> AppScanResult {
+    nonisolated static func scanApplications(
+        in roots: [URL],
+        preferredLocalizations: [String] = ["en"]
+    ) -> AppScanResult {
         let fileManager = FileManager()
         let resourceKeys: Set<URLResourceKey> = [.isDirectoryKey, .isPackageKey, .isSymbolicLinkKey]
         let maximumDirectoriesPerRoot = 20_000
@@ -91,7 +100,12 @@ actor LauncherFileScanner {
                         return AppScanResult(apps: [], accessibleRootCount: accessibleRootCount)
                     }
                     if isSafeFileURL(child, extensions: ["app"]) {
-                        addApplication(at: child, fileManager: fileManager, to: &found)
+                        addApplication(
+                            at: child,
+                            fileManager: fileManager,
+                            preferredLocalizations: preferredLocalizations,
+                            to: &found
+                        )
                         continue
                     }
 
@@ -115,6 +129,7 @@ actor LauncherFileScanner {
     nonisolated private static func addApplication(
         at url: URL,
         fileManager: FileManager,
+        preferredLocalizations: [String],
         to found: inout [String: AppItem]
     ) {
         let standardizedURL = url.standardizedFileURL
@@ -139,7 +154,10 @@ actor LauncherFileScanner {
             bundleIdentifier: bundle?.bundleIdentifier,
             category: category,
             isDeletable: deletable,
-            displayName: Self.localizedApplicationName(bundle: bundle, url: standardizedURL)
+            displayName: Self.localizedApplicationName(
+                bundle: bundle,
+                preferredLocalizations: preferredLocalizations
+            )
         )
     }
 
@@ -154,22 +172,97 @@ actor LauncherFileScanner {
         return url.standardizedFileURL.path == main.bundleURL.standardizedFileURL.path
     }
 
-    /// Resolves the application name exactly as Finder displays it in
-    /// /Applications. Finder honors the *localized* bundle display name
-    /// (InfoPlist.strings); a non-localized CFBundleDisplayName is ignored
-    /// (e.g. OBS.app), so the Finder display name is the authoritative
-    /// fallback. CFBundleName is never shown by Finder.
-    nonisolated private static func localizedApplicationName(bundle: Bundle?, url: URL) -> String? {
-        if let localized = sanitizedDisplayName(
-            bundle?.localizedInfoDictionary?["CFBundleDisplayName"] as? String
-        ) {
-            return localized
-        }
-        if var finderName = sanitizedDisplayName(FileManager.default.displayName(atPath: url.path)) {
-            if finderName.lowercased().hasSuffix(".app"), finderName.count > 4 {
-                finderName = String(finderName.dropLast(4))
+    /// Resolves the application name Finder shows, following the effective
+    /// language preference order. Finder honors localized CFBundleDisplayName
+    /// / CFBundleName (from InfoPlist.strings or the modern
+    /// InfoPlist.loctable); a bare non-localized CFBundleDisplayName is
+    /// ignored (e.g. OBS.app), and otherwise the file name is shown.
+    nonisolated private static func localizedApplicationName(
+        bundle: Bundle?,
+        preferredLocalizations: [String]
+    ) -> String? {
+        guard let bundle else { return nil }
+        let available = Set(bundle.localizations)
+        for candidate in preferredLocalizations where available.contains(candidate) {
+            if let name = infoPlistStringValue(bundle: bundle, localization: candidate) {
+                return name
             }
-            return sanitizedDisplayName(finderName)
+        }
+        return nil
+    }
+
+    /// Ordered localization directory/table names mirroring the way Finder
+    /// applies the user's language preference list. `languageSetting`
+    /// "system" derives the order from the actual preferred languages, so
+    /// any system language (zh-Hant-HK, zh-Hans, ja, fr, …) resolves names
+    /// just as Finder does; an explicit setting uses that language's order.
+    nonisolated static func localizationCandidates(
+        languageSetting: String,
+        preferredLanguages: [String]
+    ) -> [String] {
+        var ordered: [String] = []
+        if languageSetting == "system" {
+            for preference in preferredLanguages.prefix(8) {
+                ordered.append(contentsOf: lprojCandidates(forPreference: preference))
+            }
+        } else {
+            ordered.append(contentsOf: lprojCandidates(forPreference: languageSetting))
+        }
+        ordered.append(contentsOf: ["Base", "en"])
+        var seen = Set<String>()
+        return ordered.filter { seen.insert($0).inserted }
+    }
+
+    nonisolated private static func lprojCandidates(forPreference preference: String) -> [String] {
+        let normalized = preference.replacingOccurrences(of: "_", with: "-").lowercased()
+        if normalized.hasPrefix("yue") {
+            return ["yue", "zh-Hant-HK", "zh-HK", "zh_HK", "zh-Hant", "zh_TW"]
+        }
+        if normalized.hasPrefix("zh-hant-hk")
+            || normalized.hasPrefix("zh-hant-mo")
+            || normalized.hasPrefix("zh-hk")
+            || normalized.hasPrefix("zh-mo") {
+            return ["zh-Hant-HK", "zh-HK", "zh_HK", "zh-Hant", "zh_TW"]
+        }
+        if normalized.hasPrefix("zh-hant") || normalized.hasPrefix("zh-tw") {
+            return ["zh-Hant", "zh_TW", "zh-Hant-HK", "zh_HK", "zh-HK", "zh_CN", "zh"]
+        }
+        if normalized.hasPrefix("zh-hans")
+            || normalized.hasPrefix("zh-cn")
+            || normalized.hasPrefix("zh-sg")
+            || normalized == "zh" {
+            return ["zh-Hans", "zh_CN", "zh-Hans-CN", "zh-Hans-SG", "zh"]
+        }
+        if normalized.hasPrefix("ja") { return ["ja", "ja-JP", "ja_JP"] }
+        if normalized.hasPrefix("ko") { return ["ko", "ko-KR", "ko_KR"] }
+        let base = normalized.split(separator: "-").first.map(String.init) ?? normalized
+        return [normalized, base].filter { !$0.isEmpty }
+    }
+
+    nonisolated private static func infoPlistStringValue(
+        bundle: Bundle,
+        localization: String
+    ) -> String? {
+        let keys = ["CFBundleDisplayName", "CFBundleName"]
+        if let resourceURL = bundle.resourceURL,
+           let table = NSDictionary(
+               contentsOfFile: resourceURL.appendingPathComponent("InfoPlist.loctable").path
+           ),
+           let entry = table[localization] as? [String: String] {
+            for key in keys where sanitizedDisplayName(entry[key]) != nil {
+                return sanitizedDisplayName(entry[key])
+            }
+        }
+        if let path = bundle.path(
+            forResource: "InfoPlist",
+            ofType: "strings",
+            inDirectory: nil,
+            forLocalization: localization
+        ),
+           let strings = NSDictionary(contentsOfFile: path) as? [String: String] {
+            for key in keys where sanitizedDisplayName(strings[key]) != nil {
+                return sanitizedDisplayName(strings[key])
+            }
         }
         return nil
     }
