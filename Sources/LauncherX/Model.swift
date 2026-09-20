@@ -13,19 +13,24 @@ struct AppItem: Identifiable, Hashable, Sendable {
     let bundleIdentifier: String?
     let category: String?
     let isDeletable: Bool
+    let displayName: String?
     init(
         url: URL,
         bundleIdentifier: String? = nil,
         category: String? = nil,
-        isDeletable: Bool = false
+        isDeletable: Bool = false,
+        displayName: String? = nil
     ) {
         self.url = url
         self.bundleIdentifier = bundleIdentifier
         self.category = category
         self.isDeletable = isDeletable
+        self.displayName = displayName
     }
     var id: String { "app:" + url.path }
-    var name: String { url.deletingPathExtension().lastPathComponent }
+    /// Localized name exactly as Finder shows it in /Applications; falls back
+    /// to the file name when no localized display name is available.
+    var name: String { displayName ?? url.deletingPathExtension().lastPathComponent }
 }
 
 struct WallpaperItem: Identifiable, Hashable, Sendable {
@@ -61,7 +66,7 @@ struct LauncherReorderPreview: Equatable {
 struct RootPagerLayoutInfo {
     let topOffset: Double
     let size: CGSize
-    let metrics: RootGridMetrics
+    let metrics: LaunchpadLayoutMetrics
     let pageSize: Int
 }
 
@@ -190,128 +195,6 @@ enum LauncherWindowPresentation {
     }
 }
 
-struct FolderGridMetrics: Equatable, Sendable {
-    static let headerHeight = 42.0
-    static let pageIndicatorHeight = 26.0
-    static let verticalPadding = 36.0
-    static let sectionSpacing = 12.0
-    static let rowSpacing = 20.0
-
-    let columnCount: Int
-    let rowCount: Int
-    let capacity: Int
-    let cellWidth: Double
-    let gridWidth: Double
-    let gridHeight: Double
-    let panelHeight: Double
-    let pageCount: Int
-
-    nonisolated static func calculate(
-        containerWidth: Double,
-        containerHeight: Double,
-        iconSize: Double,
-        itemCount: Int
-    ) -> FolderGridMetrics {
-        let safeWidth = containerWidth.isFinite ? min(max(760, containerWidth), 100_000) : 760
-        let safeHeight = containerHeight.isFinite ? min(max(540, containerHeight), 100_000) : 540
-        let safeIconSize = iconSize.isFinite ? min(max(iconSize, 60), 112) : 92
-        let safeItemCount = min(max(0, itemCount), 1_000_000)
-        let horizontalPanelPadding = 140.0
-        let columnSpacing = 20.0
-        let availableGridWidth = max(1, safeWidth - horizontalPanelPadding)
-        let cellWidth = safeIconSize + 120
-        let possibleColumns = Int((availableGridWidth + columnSpacing) / (cellWidth + columnSpacing))
-        let maximumColumnCount = max(1, min(7, possibleColumns))
-        let columnCount = min(maximumColumnCount, max(1, safeItemCount))
-        let gridWidth = (Double(columnCount) * cellWidth)
-            + (Double(max(0, columnCount - 1)) * columnSpacing)
-
-        let heightClearance = min(120, safeHeight * 0.18)
-        let heightLimit = max(1, safeHeight - heightClearance)
-        let maximumPanelHeight = min(heightLimit, min(620, max(280, safeHeight * 0.58)))
-        let maximumReservedHeight = headerHeight + pageIndicatorHeight
-            + verticalPadding + (sectionSpacing * 2)
-        let availableGridHeight = max(1, maximumPanelHeight - maximumReservedHeight)
-        let itemHeight = safeIconSize + 24
-        let possibleRows = Int((availableGridHeight + rowSpacing) / (itemHeight + rowSpacing))
-        let maximumRowCount = max(1, min(3, possibleRows))
-        let requiredRows = Int(ceil(Double(max(1, safeItemCount)) / Double(columnCount)))
-        let rowCount = min(maximumRowCount, max(1, requiredRows))
-        let capacity = max(1, columnCount * rowCount)
-        let pageCount = max(1, Int(ceil(Double(safeItemCount) / Double(capacity))))
-        let gridHeight = (Double(rowCount) * itemHeight)
-            + (Double(max(0, rowCount - 1)) * rowSpacing)
-        let indicatorHeight = pageCount > 1 ? pageIndicatorHeight + sectionSpacing : 0
-        let panelHeight = verticalPadding + headerHeight + sectionSpacing + gridHeight + indicatorHeight
-
-        return FolderGridMetrics(
-            columnCount: columnCount,
-            rowCount: rowCount,
-            capacity: capacity,
-            cellWidth: cellWidth,
-            gridWidth: gridWidth,
-            gridHeight: gridHeight,
-            panelHeight: min(maximumPanelHeight, panelHeight),
-            pageCount: pageCount
-        )
-    }
-}
-
-struct RootGridMetrics: Equatable, Sendable {
-    static let maximumColumns = 7
-    static let maximumRows = 5
-    static let columnSpacing = 16.0
-    static let rowSpacing = 20.0
-    static let labelHeight = 24.0
-    static let dragTargetWidth = 28.0
-    static let minimumTopInset = 24.0
-    static let bottomReserve = 64.0
-
-    let columnCount: Int
-    let rowCount: Int
-    let capacity: Int
-    let iconSize: Double
-    let horizontalPadding: Double
-    let gridHeight: Double
-    let topInset: Double
-
-    nonisolated static func calculate(
-        containerWidth: Double,
-        containerHeight: Double,
-        preferredIconSize: Double
-    ) -> RootGridMetrics {
-        let safeWidth = containerWidth.isFinite ? min(max(760, containerWidth), 100_000) : 1_440
-        let safeHeight = containerHeight.isFinite ? min(max(1, containerHeight), 100_000) : 760
-        let iconSize = preferredIconSize.isFinite ? min(max(preferredIconSize, 60), 112) : 92
-        let horizontalPadding = max(42, min(180, safeWidth * 0.055))
-        let availableWidth = max(1, safeWidth - (horizontalPadding * 2))
-        let requiredCellWidth = iconSize + dragTargetWidth
-        let possibleColumns = Int(
-            (availableWidth + columnSpacing) / (requiredCellWidth + columnSpacing)
-        )
-        let columnCount = max(1, min(maximumColumns, possibleColumns))
-
-        let itemHeight = iconSize + labelHeight
-        let availableHeight = max(1, safeHeight - minimumTopInset - bottomReserve)
-        let possibleRows = Int((availableHeight + rowSpacing) / (itemHeight + rowSpacing))
-        let rowCount = max(1, min(maximumRows, possibleRows))
-        let gridHeight = (Double(rowCount) * itemHeight)
-            + (Double(max(0, rowCount - 1)) * rowSpacing)
-        let centeredTopInset = (safeHeight - bottomReserve - gridHeight) / 2
-        let topInset = max(minimumTopInset, centeredTopInset)
-
-        return RootGridMetrics(
-            columnCount: columnCount,
-            rowCount: rowCount,
-            capacity: max(1, columnCount * rowCount),
-            iconSize: iconSize,
-            horizontalPadding: horizontalPadding,
-            gridHeight: gridHeight,
-            topInset: topInset
-        )
-    }
-}
-
 @MainActor final class LauncherModel: ObservableObject {
     static let defaultBackground = "wallpaper"
 
@@ -321,6 +204,7 @@ struct RootGridMetrics: Equatable, Sendable {
         let cleaned = Self.sanitizedSearch(search)
         if cleaned != search { search = cleaned; return }
         if oldValue != search { currentPage = 0; displayedPage = 0 }
+        if !search.isEmpty, openGroupID != nil { closeFolder() }
     } }
     @Published var showLauncherSettings = false
     @Published var openGroupID: UUID?
@@ -971,7 +855,7 @@ struct RootGridMetrics: Equatable, Sendable {
     func updateRootPagerLayout(
         topOffset: Double,
         size: CGSize,
-        metrics: RootGridMetrics,
+        metrics: LaunchpadLayoutMetrics,
         pageSize: Int
     ) {
         rootPagerLayoutInfo = RootPagerLayoutInfo(
@@ -1052,23 +936,27 @@ struct RootGridMetrics: Equatable, Sendable {
         }
         let metrics = layout.metrics
         let pagerY = localYFromTop - layout.topOffset
-        guard localX >= -4, localX <= layout.size.width + 4,
+        let gridOriginX = (layout.size.width - metrics.gridWidth) / 2
+        guard localX >= gridOriginX - 8,
+              localX <= gridOriginX + metrics.gridWidth + 8,
               pagerY >= metrics.topInset - 12,
               pagerY <= metrics.topInset + metrics.gridHeight + 12 else {
             reorderPreview = nil
             return
         }
-        let availableWidth = max(1, layout.size.width - metrics.horizontalPadding * 2)
-        let cellWidth = availableWidth / Double(metrics.columnCount)
-        let rawColumn = Int((localX - metrics.horizontalPadding) / cellWidth)
-        let column = min(max(0, rawColumn), metrics.columnCount - 1)
-        let itemHeight = metrics.iconSize + RootGridMetrics.labelHeight
-        let rawRow = Int((pagerY - metrics.topInset) / (itemHeight + RootGridMetrics.rowSpacing))
-        let row = min(max(0, rawRow), metrics.rowCount - 1)
-        let cellDX = localX - metrics.horizontalPadding - Double(column) * cellWidth - cellWidth / 2
-        let cellDY = pagerY - metrics.topInset - Double(row) * (itemHeight + RootGridMetrics.rowSpacing)
+        let column = min(
+            max(0, Int((localX - gridOriginX) / metrics.columnStride)),
+            metrics.columns - 1
+        )
+        let row = min(
+            max(0, Int((pagerY - metrics.topInset) / metrics.rowStride)),
+            metrics.rows - 1
+        )
+        let cellDX = localX - gridOriginX - Double(column) * metrics.columnStride
+            - metrics.cellWidth / 2
+        let cellDY = pagerY - metrics.topInset - Double(row) * metrics.rowStride
         let iconHalf = metrics.iconSize / 2
-        if abs(cellDX) < iconHalf, cellDY >= -4, cellDY <= itemHeight + 4 {
+        if abs(cellDX) < iconHalf, cellDY >= -4, cellDY <= metrics.cellHeight + 4 {
             reorderPreview = nil
             return
         }
@@ -1077,7 +965,7 @@ struct RootGridMetrics: Equatable, Sendable {
         let pageStart = page * layout.pageSize
         let countOnPage = min(layout.pageSize, max(0, rootEntries.count - pageStart))
         let slot = min(
-            max(0, row * metrics.columnCount + column + (cellDX >= 0 ? 1 : 0)),
+            max(0, row * metrics.columns + column + (cellDX >= 0 ? 1 : 0)),
             countOnPage
         )
         reorderPreview = LauncherReorderPreview(sourceID: sourceID, page: page, slot: slot)

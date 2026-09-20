@@ -551,105 +551,175 @@ struct LauncherQualityTests {
     }
 
     private static func rootGridUsesAvailableScreenSpace() throws {
-        let screenshotLayout = RootGridMetrics.calculate(
+        let screenshotLayout = LaunchpadLayoutMetrics.calculate(
             containerWidth: 1_848,
             containerHeight: 956,
             preferredIconSize: 112
         )
-        try require(screenshotLayout.columnCount == 7, "The screenshot layout did not keep seven columns")
-        try require(screenshotLayout.rowCount == 5, "The screenshot layout did not keep five rows")
-        try require(screenshotLayout.capacity == 35, "The screenshot page capacity was incorrect")
+        try require(screenshotLayout.columns == 9, "The reference layout did not use nine columns")
+        try require(screenshotLayout.rows == 5, "The reference layout did not keep five rows")
+        try require(screenshotLayout.capacity == 45, "The reference page capacity was incorrect")
         try require(screenshotLayout.iconSize == 112, "The enlarged icon size was not preserved")
-        let bottomInset = 956 - RootGridMetrics.bottomReserve
+        let bottomInset = 956 - LaunchpadLayoutMetrics.bottomReserve
             - screenshotLayout.topInset - screenshotLayout.gridHeight
         try require(abs(bottomInset - screenshotLayout.topInset) < 0.001, "The root grid was not vertically balanced")
 
-        let compactLayout = RootGridMetrics.calculate(
+        let compactLayout = LaunchpadLayoutMetrics.calculate(
             containerWidth: 760,
             containerHeight: 472,
             preferredIconSize: 112
         )
-        try require(compactLayout.columnCount == 4, "The compact layout did not reduce its column count")
-        try require(compactLayout.rowCount == 2, "The compact layout did not reduce its row count")
+        try require(compactLayout.columns == 3, "The compact layout did not reduce its column count")
+        try require(compactLayout.rows == 2, "The compact layout did not reduce its row count")
         try require(
-            compactLayout.topInset + compactLayout.gridHeight + RootGridMetrics.bottomReserve <= 472,
+            compactLayout.topInset + compactLayout.gridHeight + LaunchpadLayoutMetrics.bottomReserve <= 472,
             "The compact root grid overflowed its page"
         )
 
-        let extremeLayout = RootGridMetrics.calculate(
+        let extremeLayout = LaunchpadLayoutMetrics.calculate(
             containerWidth: .greatestFiniteMagnitude,
             containerHeight: .greatestFiniteMagnitude,
             preferredIconSize: .greatestFiniteMagnitude
         )
-        try require(extremeLayout.capacity == 35, "Extreme root geometry was not safely bounded")
+        try require(extremeLayout.capacity == 45, "Extreme root geometry was not safely bounded")
+
+        // Spacing stays fixed as the screen grows; extra width becomes margin.
+        let laptopLayout = LaunchpadLayoutMetrics.calculate(
+            containerWidth: 1_512,
+            containerHeight: 868,
+            preferredIconSize: 92
+        )
+        let wideLayout = LaunchpadLayoutMetrics.calculate(
+            containerWidth: 4_096,
+            containerHeight: 1_300,
+            preferredIconSize: 92
+        )
+        try require(
+            abs(laptopLayout.columnStride - wideLayout.columnStride) < 0.001,
+            "Icon spacing changed with screen width"
+        )
+        try require(
+            wideLayout.gridWidth <= LaunchpadLayoutMetrics.maximumGridWidth + 0.001,
+            "The wide-screen grid exceeded its maximum width"
+        )
+        try require(
+            wideLayout.columns > laptopLayout.columns,
+            "The wide screen did not add columns at the same fixed density"
+        )
+        try require(
+            wideLayout.columns == Int((LaunchpadLayoutMetrics.usableGridWidth(containerWidth: 4_096)
+                + wideLayout.horizontalSpacing) / wideLayout.columnStride),
+            "The wide-screen column count did not follow the fixed density rule"
+        )
+
+        let invalidLayout = LaunchpadLayoutMetrics.calculate(
+            containerWidth: .nan,
+            containerHeight: .infinity,
+            preferredIconSize: .nan
+        )
+        try require(invalidLayout.capacity > 0, "Invalid root geometry produced an unusable capacity")
     }
 
     private static func folderGridMetricsNeverOverflowTheirPanel() throws {
-        let singleRowLayout = FolderGridMetrics.calculate(
+        let base = LaunchpadLayoutMetrics.calculate(
             containerWidth: 1_822,
             containerHeight: 992,
-            iconSize: 92,
-            itemCount: 4
+            preferredIconSize: 92
         )
-        try require(singleRowLayout.columnCount == 4, "A four-application folder kept unused columns")
-        try require(singleRowLayout.rowCount == 1, "A four-application folder kept unused rows")
-        try require(singleRowLayout.capacity == 4, "The single-row folder capacity was incorrect")
-        try require(singleRowLayout.pageCount == 1, "A four-application folder unexpectedly added pages")
-        try require(singleRowLayout.panelHeight == 206, "The four-application folder canvas was not compact")
-        try require(folderGridFits(singleRowLayout), "The single-row folder grid overflowed its panel")
+        let singleRowLayout = LaunchpadLayoutMetrics.folderContent(
+            base: base,
+            itemCount: 2,
+            rowLimit: 3
+        )
+        try require(singleRowLayout.columns == 2, "A two-application folder kept unused columns")
+        try require(singleRowLayout.rows == 1, "A two-application folder kept unused rows")
+        try require(singleRowLayout.capacity == 2, "The single-row folder capacity was incorrect")
+        try require(folderGridFits(singleRowLayout, base: base), "The single-row folder grid overflowed")
 
-        let multiPageLayout = FolderGridMetrics.calculate(
-            containerWidth: 1_822,
-            containerHeight: 992,
-            iconSize: 92,
-            itemCount: 50
+        let smallFolderLayout = LaunchpadLayoutMetrics.folderContent(
+            base: base,
+            itemCount: 4,
+            rowLimit: 3
         )
-        try require(multiPageLayout.columnCount == 7, "The large folder did not use seven columns")
-        try require(multiPageLayout.rowCount == 3, "The large folder did not fit three rows")
-        try require(multiPageLayout.capacity == 21, "The large folder page capacity was incorrect")
-        try require(multiPageLayout.pageCount == 3, "The large folder page count was incorrect")
+        try require(smallFolderLayout.columns == 3, "The small folder did not use three columns")
+        try require(smallFolderLayout.rows == 2, "The small folder did not wrap to a second row")
+        try require(folderGridFits(smallFolderLayout, base: base), "The small folder grid overflowed")
+
+        let multiPageLayout = LaunchpadLayoutMetrics.folderContent(
+            base: base,
+            itemCount: 50,
+            rowLimit: 3
+        )
         try require(
-            multiPageLayout.panelHeight > singleRowLayout.panelHeight,
-            "Folder canvas height did not grow with its application count"
+            multiPageLayout.columns == base.columns,
+            "The large folder did not reuse the root column count"
         )
-        try require(folderGridFits(multiPageLayout), "The large folder grid overflowed its panel")
+        try require(multiPageLayout.rows == 3, "The large folder did not fit three rows")
+        try require(
+            multiPageLayout.pageCount(forItemCount: 50) > 1,
+            "The large folder unexpectedly fit on one page"
+        )
+        try require(
+            multiPageLayout.gridHeight > singleRowLayout.gridHeight,
+            "Folder grid height did not grow with its application count"
+        )
+        try require(folderGridFits(multiPageLayout, base: base), "The large folder grid overflowed")
 
-        let compactLayout = FolderGridMetrics.calculate(
+        let compactBase = LaunchpadLayoutMetrics.calculate(
             containerWidth: 760,
             containerHeight: 540,
-            iconSize: 96,
-            itemCount: 20
+            preferredIconSize: 96
         )
-        try require(compactLayout.rowCount == 1, "A compact folder incorrectly forced multiple rows")
-        try require(folderGridFits(compactLayout), "The compact folder grid overflowed its panel")
+        let compactLayout = LaunchpadLayoutMetrics.folderContent(
+            base: compactBase,
+            itemCount: 20,
+            rowLimit: 2
+        )
+        try require(compactLayout.rows == 2, "A compact folder ignored its row limit")
+        try require(
+            compactLayout.pageCount(forItemCount: 20) >= 3,
+            "The compact folder page count was incorrect"
+        )
+        try require(folderGridFits(compactLayout, base: compactBase), "The compact folder grid overflowed")
 
-        let invalidLayout = FolderGridMetrics.calculate(
-            containerWidth: .nan,
-            containerHeight: .infinity,
-            iconSize: .nan,
-            itemCount: Int.min
+        let invalidLayout = LaunchpadLayoutMetrics.folderContent(
+            base: LaunchpadLayoutMetrics.calculate(
+                containerWidth: .nan,
+                containerHeight: .nan,
+                preferredIconSize: .nan
+            ),
+            itemCount: 0,
+            rowLimit: 3
         )
         try require(invalidLayout.capacity > 0, "Invalid geometry produced an unusable folder capacity")
-        try require(folderGridFits(invalidLayout), "Invalid geometry produced an overflowing folder layout")
 
-        let extremeLayout = FolderGridMetrics.calculate(
-            containerWidth: .greatestFiniteMagnitude,
-            containerHeight: .greatestFiniteMagnitude,
-            iconSize: .greatestFiniteMagnitude,
-            itemCount: Int.max
+        let extremeLayout = LaunchpadLayoutMetrics.folderContent(
+            base: LaunchpadLayoutMetrics.calculate(
+                containerWidth: .greatestFiniteMagnitude,
+                containerHeight: .greatestFiniteMagnitude,
+                preferredIconSize: .greatestFiniteMagnitude
+            ),
+            itemCount: Int.max,
+            rowLimit: 3
         )
-        try require(extremeLayout.columnCount == 7, "Extreme geometry was not safely bounded")
-        try require(folderGridFits(extremeLayout), "Extreme geometry produced an overflowing folder layout")
+        try require(
+            extremeLayout.columns <= LaunchpadLayoutMetrics.maximumColumns,
+            "Extreme geometry was not safely bounded"
+        )
+        try require(folderGridFits(extremeLayout, base: extremeLayout), "Extreme geometry overflowed")
     }
 
-    private static func folderGridFits(_ metrics: FolderGridMetrics) -> Bool {
-        let reservedHeight = FolderGridMetrics.headerHeight
-            + FolderGridMetrics.verticalPadding
-            + FolderGridMetrics.sectionSpacing
-            + (metrics.pageCount > 1
-                ? FolderGridMetrics.pageIndicatorHeight + FolderGridMetrics.sectionSpacing
-                : 0)
-        return metrics.gridHeight + reservedHeight <= metrics.panelHeight + 0.001
+    private static func folderGridFits(
+        _ metrics: LaunchpadLayoutMetrics,
+        base: LaunchpadLayoutMetrics
+    ) -> Bool {
+        let expectedWidth = Double(metrics.columns) * base.cellWidth
+            + Double(metrics.columns - 1) * base.horizontalSpacing
+        let expectedHeight = Double(metrics.rows) * base.cellHeight
+            + Double(metrics.rows - 1) * base.verticalSpacing
+        return metrics.gridWidth <= expectedWidth + 0.001
+            && metrics.gridHeight <= expectedHeight + 0.001
+            && metrics.columns <= base.columns
     }
 
     private static func pageWindowLimitsRenderedPages() throws {

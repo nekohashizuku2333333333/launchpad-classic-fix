@@ -10,6 +10,7 @@ swiftc -parse-as-library \
   Sources/LauncherX/Model.swift \
   Sources/LauncherX/FileSystemServices.swift \
   Sources/LauncherX/ScrollWheelMonitor.swift \
+  Sources/LauncherX/LaunchpadLayout.swift \
   Sources/LauncherX/ContentView.swift \
   QualityTests/LauncherQualityTests.swift \
   -o .build/quality-tests/LauncherQualityTests \

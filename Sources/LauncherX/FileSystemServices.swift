@@ -138,8 +138,46 @@ actor LauncherFileScanner {
             url: standardizedURL,
             bundleIdentifier: bundle?.bundleIdentifier,
             category: category,
-            isDeletable: deletable
+            isDeletable: deletable,
+            displayName: Self.localizedApplicationName(bundle: bundle, url: standardizedURL)
         )
+    }
+
+    /// Resolves the application name exactly as Finder displays it in
+    /// /Applications: the localized bundle display name first, then the
+    /// bundle name, then the Finder display name, and finally the file name.
+    nonisolated private static func localizedApplicationName(bundle: Bundle?, url: URL) -> String? {
+        if let localized = bundle?.localizedInfoDictionary {
+            if let name = sanitizedDisplayName(localized["CFBundleDisplayName"] as? String) {
+                return name
+            }
+            if let name = sanitizedDisplayName(localized["CFBundleName"] as? String) {
+                return name
+            }
+        }
+        if let info = bundle?.infoDictionary {
+            if let name = sanitizedDisplayName(info["CFBundleDisplayName"] as? String) {
+                return name
+            }
+            if let name = sanitizedDisplayName(info["CFBundleName"] as? String) {
+                return name
+            }
+        }
+        if var finderName = sanitizedDisplayName(FileManager.default.displayName(atPath: url.path)) {
+            if finderName.lowercased().hasSuffix(".app"), finderName.count > 4 {
+                finderName = String(finderName.dropLast(4))
+            }
+            return sanitizedDisplayName(finderName)
+        }
+        return nil
+    }
+
+    nonisolated private static func sanitizedDisplayName(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let cleaned = value.components(separatedBy: .controlCharacters).joined()
+            .trimmingCharacters(in: .whitespaces)
+        guard !cleaned.isEmpty, cleaned.count <= 128 else { return nil }
+        return cleaned
     }
 
     nonisolated static func scanWallpapers(in roots: [URL]) -> [WallpaperItem] {
