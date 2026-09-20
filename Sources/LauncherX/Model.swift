@@ -120,6 +120,7 @@ enum LaunchpadPageMotion {
 enum LaunchpadDismissMotion {
     static let duration = 0.25
     static let scale = 1.10
+    static let reducedMotionFadeDuration = 0.18
 
     nonisolated static func shouldAnimate(
         requested: Bool,
@@ -631,22 +632,23 @@ struct RootGridMetrics: Equatable, Sendable {
         let requestID = UUID()
         dismissalRequestID = requestID
         isDismissing = true
-        let shouldAnimate = LaunchpadDismissMotion.shouldAnimate(
+        let shouldScale = LaunchpadDismissMotion.shouldAnimate(
             requested: animated,
             applicationIsActive: NSApp.isActive,
             reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
             windowIsVisible: window.isVisible
         )
-        guard shouldAnimate else {
-            finishLauncherDismissal(requestID: requestID, window: window)
+        let shouldFadeOut = animated && window.isVisible
+        if shouldScale || shouldFadeOut {
+            animateLauncherDismissal(requestID: requestID, window: window, includesScale: shouldScale)
             return
         }
-        animateLauncherDismissal(requestID: requestID, window: window)
+        finishLauncherDismissal(requestID: requestID, window: window)
     }
 
     func handleApplicationDidResignActive() {
         guard !showLauncherSettings else { return }
-        dismissLauncher(animated: false)
+        dismissLauncher(animated: true)
     }
 
     func handleApplicationDidHide() {
@@ -1234,32 +1236,40 @@ struct RootGridMetrics: Equatable, Sendable {
         })
     }
 
-    private func animateLauncherDismissal(requestID: UUID, window: NSWindow) {
-        let contentLayer = window.contentView.flatMap { contentView -> CALayer? in
-            contentView.wantsLayer = true
-            return contentView.layer
-        }
-        if let contentLayer {
-            centerAnchorPoint(of: contentLayer)
-            let scaleAnimation = CABasicAnimation(keyPath: "transform.scale")
-            scaleAnimation.fromValue = 1.0
-            scaleAnimation.toValue = LaunchpadDismissMotion.scale
-            scaleAnimation.duration = LaunchpadDismissMotion.duration
-            scaleAnimation.timingFunction = CAMediaTimingFunction(name: .easeIn)
+    private func animateLauncherDismissal(
+        requestID: UUID,
+        window: NSWindow,
+        includesScale: Bool
+    ) {
+        if includesScale {
+            let contentLayer = window.contentView.flatMap { contentView -> CALayer? in
+                contentView.wantsLayer = true
+                return contentView.layer
+            }
+            if let contentLayer {
+                centerAnchorPoint(of: contentLayer)
+                let scaleAnimation = CABasicAnimation(keyPath: "transform.scale")
+                scaleAnimation.fromValue = 1.0
+                scaleAnimation.toValue = LaunchpadDismissMotion.scale
+                scaleAnimation.duration = LaunchpadDismissMotion.duration
+                scaleAnimation.timingFunction = CAMediaTimingFunction(name: .easeIn)
 
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
-            contentLayer.transform = CATransform3DMakeScale(
-                LaunchpadDismissMotion.scale,
-                LaunchpadDismissMotion.scale,
-                1
-            )
-            CATransaction.commit()
-            contentLayer.add(scaleAnimation, forKey: "launchpad.dismiss.scale")
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                contentLayer.transform = CATransform3DMakeScale(
+                    LaunchpadDismissMotion.scale,
+                    LaunchpadDismissMotion.scale,
+                    1
+                )
+                CATransaction.commit()
+                contentLayer.add(scaleAnimation, forKey: "launchpad.dismiss.scale")
+            }
         }
 
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = LaunchpadDismissMotion.duration
+            context.duration = includesScale
+                ? LaunchpadDismissMotion.duration
+                : LaunchpadDismissMotion.reducedMotionFadeDuration
             context.timingFunction = CAMediaTimingFunction(name: .easeIn)
             window.animator().alphaValue = 0
         } completionHandler: { [weak self, weak window] in
