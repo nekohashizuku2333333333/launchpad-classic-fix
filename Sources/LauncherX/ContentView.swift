@@ -493,7 +493,7 @@ struct RootPagerCanvas: View {
         GeometryReader { pagerGeometry in
             let pageWidth = max(1, pagerGeometry.size.width)
             let pageHeight = max(1, pagerGeometry.size.height)
-            let activePage = min(model.currentPage, pageCount - 1)
+            let activePage = min(model.displayedPage, pageCount - 1)
 
             ZStack(alignment: .leading) {
                 Color.clear
@@ -519,7 +519,7 @@ struct RootPagerCanvas: View {
 
                 ForEach(
                     LaunchpadPageMotion.visiblePages(
-                        currentPage: model.currentPage,
+                        currentPage: model.displayedPage,
                         pageCount: pageCount
                     ),
                     id: \.self
@@ -556,17 +556,16 @@ struct RootPagerCanvas: View {
                             : .spring(response: 0.3, dampingFraction: 0.85),
                         value: model.reorderDragSourceID
                     )
-                    .transition(reduceMotion ? .opacity : .identity)
-                    .id(reduceMotion ? "reduced-\(page)-\(model.pageSwapGeneration)" : "\(page)")
                     .offset(
                         x: CGFloat(page - activePage) * pageWidth
                             + dragOffset
                     )
-                    .allowsHitTesting(page == model.currentPage)
+                    .allowsHitTesting(page == model.displayedPage)
                     .compositingGroup()
                 }
             }
             .clipped()
+            .opacity(model.reducedMotionPageHidden ? 0 : 1)
             .onAppear { reportLayout(size: pagerGeometry.size) }
             .onChange(of: pagerGeometry.size) { _, size in reportLayout(size: size) }
             .onChange(of: metrics) { _, _ in reportLayout(size: pagerGeometry.size) }
@@ -1344,7 +1343,7 @@ struct FolderPagerCanvas: View {
 
             ForEach(
                 LaunchpadPageMotion.visiblePages(
-                    currentPage: model.folderPage,
+                    currentPage: model.displayedFolderPage,
                     pageCount: pageCount
                 ),
                 id: \.self
@@ -1355,16 +1354,15 @@ struct FolderPagerCanvas: View {
                     columns: columns,
                     gridWidth: gridWidth
                 )
-                .transition(reduceMotion ? .opacity : .identity)
-                .id(reduceMotion ? "reduced-\(page)-\(model.pageSwapGeneration)" : "\(page)")
                 .offset(
-                    x: CGFloat(page - min(model.folderPage, pageCount - 1)) * pageWidth
+                    x: CGFloat(page - min(model.displayedFolderPage, pageCount - 1)) * pageWidth
                         + dragOffset
                 )
-                .allowsHitTesting(page == model.folderPage)
+                .allowsHitTesting(page == model.displayedFolderPage)
                 .compositingGroup()
             }
         }
+        .opacity(model.reducedMotionPageHidden ? 0 : 1)
     }
 
     private func displayApps(on page: Int) -> [FolderDisplayEntry] {
@@ -1418,7 +1416,7 @@ struct FolderPagerCanvas: View {
                     } else {
                         withAnimation(LaunchpadPageMotion.animation(initialVelocity: animationVelocity)) {
                             dragOffset = 0
-                            model.folderPage = min(max(0, model.folderPage + delta), pageCount - 1)
+                            model.setFolderPage(model.folderPage + delta)
                         }
                     }
                 } else {

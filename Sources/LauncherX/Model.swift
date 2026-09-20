@@ -319,7 +319,7 @@ struct RootGridMetrics: Equatable, Sendable {
     @Published var search = "" { didSet {
         let cleaned = Self.sanitizedSearch(search)
         if cleaned != search { search = cleaned; return }
-        if oldValue != search { currentPage = 0 }
+        if oldValue != search { currentPage = 0; displayedPage = 0 }
     } }
     @Published var showLauncherSettings = false
     @Published var openGroupID: UUID?
@@ -358,7 +358,9 @@ struct RootGridMetrics: Equatable, Sendable {
     } }
     @Published private(set) var reducesTransparency =
         NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
-    @Published private(set) var pageSwapGeneration = 0
+    @Published private(set) var reducedMotionPageHidden = false
+    @Published private(set) var displayedPage = 0
+    @Published private(set) var displayedFolderPage = 0
     @Published private(set) var reorderPreview: LauncherReorderPreview?
     @Published private(set) var reorderDragSourceID: String?
 
@@ -400,6 +402,7 @@ struct RootGridMetrics: Equatable, Sendable {
     private var reorderEdgeHoverDirection: Int?
     private var reorderEdgeHoverStartDate: Date?
     private var reorderEdgeHoverHasFlipped = false
+    private var reducedMotionSwapTimer: Timer?
     private var accessibilityOptionsObserver: NSObjectProtocol?
     private var squareIconPaths: Set<String> = []
     private var rootPagerLayoutInfo: RootPagerLayoutInfo?
@@ -656,7 +659,12 @@ struct RootGridMetrics: Equatable, Sendable {
         }
         releaseTransientImageResources()
     }
-    func closeFolder() { openGroupID = nil; folderPage = 0; folderPageCount = 1 }
+    func closeFolder() {
+        openGroupID = nil
+        folderPage = 0
+        displayedFolderPage = 0
+        folderPageCount = 1
+    }
     func group(for id: UUID?) -> AppGroup? { groups.first { $0.id == id } }
 
     func renameGroup(_ id: UUID, to name: String) {
@@ -692,16 +700,19 @@ struct RootGridMetrics: Equatable, Sendable {
     func setPageCount(_ count: Int) {
         pageCount = max(1, count)
         currentPage = min(currentPage, pageCount - 1)
+        displayedPage = min(displayedPage, pageCount - 1)
     }
 
     func goToPage(_ page: Int, initialVelocity: Double = 0) {
         let destination = min(max(0, page), pageCount - 1)
         guard destination != currentPage else { return }
         if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
-            animateReducedMotionPageSwap { currentPage = destination }
+            currentPage = destination
+            animateReducedMotionPageSwap { self.displayedPage = destination }
         } else {
             withAnimation(LaunchpadPageMotion.animation(initialVelocity: initialVelocity)) {
                 currentPage = destination
+                displayedPage = destination
             }
         }
     }
@@ -715,31 +726,53 @@ struct RootGridMetrics: Equatable, Sendable {
     }
 
     func setCurrentPage(_ page: Int) {
-        currentPage = min(max(0, page), pageCount - 1)
+        let clamped = min(max(0, page), pageCount - 1)
+        currentPage = clamped
+        displayedPage = clamped
     }
 
     func setFolderPageCount(_ count: Int) {
         folderPageCount = max(1, count)
         folderPage = min(folderPage, folderPageCount - 1)
+        displayedFolderPage = min(displayedFolderPage, folderPageCount - 1)
+    }
+
+    func setFolderPage(_ page: Int) {
+        let clamped = min(max(0, page), folderPageCount - 1)
+        folderPage = clamped
+        displayedFolderPage = clamped
     }
 
     func goToFolderPage(_ page: Int, initialVelocity: Double = 0) {
         let destination = min(max(0, page), folderPageCount - 1)
         guard destination != folderPage else { return }
         if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
-            animateReducedMotionPageSwap { folderPage = destination }
+            folderPage = destination
+            animateReducedMotionPageSwap { self.displayedFolderPage = destination }
         } else {
             withAnimation(LaunchpadPageMotion.animation(initialVelocity: initialVelocity)) {
                 folderPage = destination
+                displayedFolderPage = destination
             }
         }
     }
 
-    private func animateReducedMotionPageSwap(_ swap: () -> Void) {
-        withAnimation(.easeInOut(duration: LaunchpadPageMotion.reducedMotionDuration)) {
-            pageSwapGeneration &+= 1
-            swap()
+    private func animateReducedMotionPageSwap(_ swap: @escaping @MainActor () -> Void) {
+        if !reducedMotionPageHidden {
+            withAnimation(.easeOut(duration: 0.09)) { reducedMotionPageHidden = true }
         }
+        reducedMotionSwapTimer?.invalidate()
+        let timer = Timer(timeInterval: 0.1, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.reducedMotionSwapTimer = nil
+                swap()
+                withAnimation(.easeIn(duration: 0.16)) { self.reducedMotionPageHidden = false }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .default)
+        RunLoop.main.add(timer, forMode: .eventTracking)
+        reducedMotionSwapTimer = timer
     }
 
     func navigateVisiblePages(by delta: Int) {
@@ -1038,7 +1071,7 @@ struct RootGridMetrics: Equatable, Sendable {
             return
         }
         let pageCount = max(1, Int(ceil(Double(rootEntries.count) / Double(layout.pageSize))))
-        let page = min(currentPage, pageCount - 1)
+        let page = min(displayedPage, pageCount - 1)
         let pageStart = page * layout.pageSize
         let countOnPage = min(layout.pageSize, max(0, rootEntries.count - pageStart))
         let slot = min(
@@ -1076,7 +1109,7 @@ struct RootGridMetrics: Equatable, Sendable {
             return
         }
         let pageCount = max(1, Int(ceil(Double(group.appPaths.count) / Double(layout.capacity))))
-        let page = min(folderPage, pageCount - 1)
+        let page = min(displayedFolderPage, pageCount - 1)
         let pageStart = page * layout.capacity
         let countOnPage = min(layout.capacity, max(0, group.appPaths.count - pageStart))
         let slot = min(
@@ -1190,12 +1223,13 @@ struct RootGridMetrics: Equatable, Sendable {
 
     private func launcherWindow() -> NSWindow? {
         if let registeredLauncherWindow { return registeredLauncherWindow }
-        if let keyWindow = NSApp.keyWindow,
+        guard let app = NSApp else { return nil }
+        if let keyWindow = app.keyWindow,
            keyWindow.sheetParent == nil,
            !(keyWindow is NSPanel) {
             return keyWindow
         }
-        return NSApp.windows.first(where: { window in
+        return app.windows.first(where: { window in
             window.sheetParent == nil && !(window is NSPanel)
         })
     }
@@ -1280,6 +1314,8 @@ struct RootGridMetrics: Equatable, Sendable {
         initialIconPreloadTask?.cancel()
         reorderDragTimer?.invalidate()
         reorderDragTimer = nil
+        reducedMotionSwapTimer?.invalidate()
+        reducedMotionSwapTimer = nil
         if let accessibilityOptionsObserver {
             NotificationCenter.default.removeObserver(accessibilityOptionsObserver)
         }
