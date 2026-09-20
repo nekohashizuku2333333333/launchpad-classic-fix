@@ -77,7 +77,12 @@ struct ContentView: View {
                 "發生未知錯誤。"
             ))
         }
-        .animation(reduceMotion ? nil : .spring(response: 0.38, dampingFraction: 0.86), value: model.openGroupID)
+        .animation(
+            reduceMotion
+                ? .easeInOut(duration: LaunchpadPageMotion.reducedMotionDuration)
+                : .spring(response: 0.38, dampingFraction: 0.86),
+            value: model.openGroupID
+        )
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.38), value: model.background)
         .animation(
             reduceMotion ? nil : .easeInOut(duration: 0.24),
@@ -99,18 +104,40 @@ struct ContentView: View {
 
     private var searchField: some View {
         HStack(spacing: 7) {
-            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-            TextField(model.text("Search", "検索", "搜尋"), text: $model.search)
-                .textFieldStyle(.plain).frame(width: 210)
+            Image(systemName: "magnifyingglass").foregroundStyle(searchSymbolColor)
+            TextField(
+                model.text("Search", "検索", "搜尋"),
+                text: $model.search,
+                prompt: searchPrompt
+            )
+            .textFieldStyle(.plain).frame(width: 210)
             if !model.search.isEmpty {
                 Button { model.search = "" } label: { Image(systemName: "xmark.circle.fill") }
-                    .buttonStyle(.plain).foregroundStyle(.secondary)
+                    .buttonStyle(.plain).foregroundStyle(searchSymbolColor)
                     .accessibilityLabel(model.text("Clear Search", "検索を消去", "清除搜尋"))
             }
             LauncherSettingsMenu()
         }
         .padding(.leading, 12).padding(.trailing, 6).frame(height: 34)
-        .launchpadGlass(in: Capsule(), interactive: true)
+        .launchpadGlass(
+            in: Capsule(),
+            interactive: true,
+            reducesTransparency: model.reducesTransparency,
+            solidStyle: usesLightSearchContent ? .light : .dark
+        )
+    }
+
+    private var usesLightSearchContent: Bool { model.background == "light" }
+
+    private var searchSymbolColor: Color {
+        guard !usesLightSearchContent, model.reducesTransparency else { return .secondary }
+        return .white.opacity(0.72)
+    }
+
+    private var searchPrompt: Text? {
+        guard !usesLightSearchContent, model.reducesTransparency else { return nil }
+        return Text(model.text("Search", "検索", "搜尋"))
+            .foregroundColor(.white.opacity(0.55))
     }
 }
 
@@ -383,6 +410,7 @@ struct RootPagerCanvas: View {
         GeometryReader { pagerGeometry in
             let pageWidth = max(1, pagerGeometry.size.width)
             let pageHeight = max(1, pagerGeometry.size.height)
+            let activePage = min(model.currentPage, pageCount - 1)
 
             ZStack(alignment: .leading) {
                 Color.clear
@@ -391,6 +419,11 @@ struct RootPagerCanvas: View {
                     .simultaneousGesture(
                         TapGesture().onEnded { model.dismissLauncher() }
                     )
+                    .dropDestination(for: String.self) { items, _ in
+                        guard let sourceID = items.first else { return false }
+                        model.reorderToPageEnd(sourceID, page: activePage, pageSize: pageSize)
+                        return true
+                    }
 
                 ForEach(
                     LaunchpadPageMotion.visiblePages(
@@ -411,13 +444,14 @@ struct RootPagerCanvas: View {
                         reduceMotion ? nil : .easeInOut(duration: 0.24),
                         value: Array(entries(on: page)).map(\.id)
                     )
+                    .transition(reduceMotion ? .opacity : .identity)
+                    .id(reduceMotion ? "reduced-\(page)-\(model.pageSwapGeneration)" : "\(page)")
                     .offset(
-                        x: CGFloat(page - min(model.currentPage, pageCount - 1)) * pageWidth
+                        x: CGFloat(page - activePage) * pageWidth
                             + dragOffset
                     )
                     .allowsHitTesting(page == model.currentPage)
                     .compositingGroup()
-                    .transition(.identity)
                 }
             }
             .clipped()
@@ -496,7 +530,11 @@ struct LaunchpadPageIndicator: View {
         }
         .padding(.horizontal, 7)
         .frame(height: 26)
-        .launchpadGlass(in: Capsule(), interactive: true)
+        .launchpadGlass(
+            in: Capsule(),
+            interactive: true,
+            reducesTransparency: model.reducesTransparency
+        )
         .shadow(color: .black.opacity(0.2), radius: 3, y: 1)
         .animation(reduceMotion ? nil : LaunchpadPageMotion.animation(), value: currentPage)
     }
@@ -527,7 +565,10 @@ struct EntryTile: View {
                 case .group(let group): model.open(group)
                 }
             }
-            .draggable(entry.id)
+            .onDrag {
+                model.startReorderDrag()
+                return NSItemProvider(object: entry.id as NSString)
+            }
             .dropDestination(for: String.self) { items, _ in
                 guard let sourceID = items.first else { return false }
                 model.handleDrop(sourceID, on: entry)
@@ -604,7 +645,8 @@ struct FolderIcon: View {
             .padding(8).frame(width: size, height: size)
             .launchpadGlass(
                 in: RoundedRectangle(cornerRadius: size * 0.22),
-                interactive: true
+                interactive: true,
+                reducesTransparency: model.reducesTransparency
             )
             .shadow(color: .black.opacity(0.3), radius: 7, y: 4)
             Text(group.name).font(.system(size: 13, weight: .medium)).lineLimit(1)
@@ -746,7 +788,9 @@ struct FolderOverlay: View {
                 .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
                 .launchpadGlass(
                     in: RoundedRectangle(cornerRadius: 28, style: .continuous),
-                    tint: .white.opacity(0.035)
+                    tint: .white.opacity(0.035),
+                    reducesTransparency: model.reducesTransparency,
+                    solidStyle: model.background == "light" ? .light : .dark
                 )
                 .dropDestination(for: String.self) { items, _ in
                     guard let sourceID = items.first else { return false }
@@ -1016,6 +1060,7 @@ final class FolderRenamePanelCoordinator: NSObject, ObservableObject, NSWindowDe
 
 struct FolderPagerCanvas: View {
     @EnvironmentObject var model: LauncherModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @GestureState private var dragOffset: CGFloat = 0
     let group: AppGroup
     let folderApps: [AppItem]
@@ -1030,6 +1075,15 @@ struct FolderPagerCanvas: View {
             Color.clear
                 .contentShape(Rectangle())
                 .gesture(pageDragGesture)
+                .dropDestination(for: String.self) { items, _ in
+                    guard let sourceID = items.first else { return false }
+                    model.reorderInOpenGroupToPageEnd(
+                        sourceID,
+                        page: min(model.folderPage, pageCount - 1),
+                        capacity: capacity
+                    )
+                    return true
+                }
 
             ForEach(
                 LaunchpadPageMotion.visiblePages(
@@ -1044,13 +1098,14 @@ struct FolderPagerCanvas: View {
                     columns: columns,
                     gridWidth: gridWidth
                 )
+                .transition(reduceMotion ? .opacity : .identity)
+                .id(reduceMotion ? "reduced-\(page)-\(model.pageSwapGeneration)" : "\(page)")
                 .offset(
                     x: CGFloat(page - min(model.folderPage, pageCount - 1)) * pageWidth
                         + dragOffset
                 )
                 .allowsHitTesting(page == model.folderPage)
                 .compositingGroup()
-                .transition(.identity)
             }
         }
     }
@@ -1121,7 +1176,10 @@ struct FolderAppTile: View {
         AppIcon(app: app, size: model.iconSize)
             .contentShape(Rectangle())
             .onTapGesture { model.launch(app) }
-            .draggable(app.id)
+            .onDrag {
+                model.startReorderDrag()
+                return NSItemProvider(object: app.id as NSString)
+            }
             .dropDestination(for: String.self) { items, _ in
                 guard let sourceID = items.first else { return false }
                 model.reorderInOpenGroup(sourceID, before: app.id)
@@ -1202,26 +1260,44 @@ struct LaunchpadBackground: View {
     }
 }
 
+enum LaunchpadSolidGlassStyle {
+    case dark
+    case light
+}
+
 extension View {
     @ViewBuilder
     func launchpadGlass<S: Shape>(
         in shape: S,
         interactive: Bool = false,
-        tint: Color? = nil
+        tint: Color? = nil,
+        reducesTransparency: Bool = false,
+        solidStyle: LaunchpadSolidGlassStyle = .dark
     ) -> some View {
-#if compiler(>=6.2)
-        if #available(macOS 26.0, *) {
-            glassEffect(
-                .regular.tint(tint).interactive(interactive),
-                in: shape
-            )
+        if reducesTransparency {
+            switch solidStyle {
+            case .dark:
+                background(Color.black.opacity(0.45), in: shape)
+                    .overlay(shape.stroke(Color.white.opacity(0.32), lineWidth: 0.8))
+            case .light:
+                background(Color.white.opacity(0.85), in: shape)
+                    .overlay(shape.stroke(Color.black.opacity(0.1), lineWidth: 0.8))
+            }
         } else {
+#if compiler(>=6.2)
+            if #available(macOS 26.0, *) {
+                glassEffect(
+                    .regular.tint(tint).interactive(interactive),
+                    in: shape
+                )
+            } else {
+                background(.ultraThinMaterial, in: shape)
+                    .overlay(shape.stroke(Color.white.opacity(0.18), lineWidth: 0.7))
+            }
+#else
             background(.ultraThinMaterial, in: shape)
                 .overlay(shape.stroke(Color.white.opacity(0.18), lineWidth: 0.7))
-        }
-#else
-        background(.ultraThinMaterial, in: shape)
-            .overlay(shape.stroke(Color.white.opacity(0.18), lineWidth: 0.7))
 #endif
+        }
     }
 }

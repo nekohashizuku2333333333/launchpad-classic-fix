@@ -58,6 +58,7 @@ enum LaunchpadPageMotion {
     static let pageDecisionRatio = 0.15
     static let standardDuration = 0.34
     static let minimumDuration = 0.22
+    static let reducedMotionDuration = 0.22
 
     static func animation(initialVelocity: Double = 0) -> Animation {
         let safeVelocity = initialVelocity.isFinite
@@ -332,6 +333,9 @@ struct RootGridMetrics: Equatable, Sendable {
         usesReferenceIconSize = false
         defaults.set(iconSize, forKey: "iconSize")
     } }
+    @Published private(set) var reducesTransparency =
+        NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
+    @Published private(set) var pageSwapGeneration = 0
 
     private let groupsKey = "launcher.groups.v2"
     private let orderKey = "launcher.order.v1"
@@ -367,6 +371,10 @@ struct RootGridMetrics: Equatable, Sendable {
     private var initialReadinessHandlers: [@MainActor () -> Void] = []
     private var usesReferenceIconSize = true
     private var isApplyingReferenceIconSize = false
+    private var reorderDragTimer: Timer?
+    private var reorderEdgeHoverDirection: Int?
+    private var reorderEdgeHoverStartDate: Date?
+    private var accessibilityOptionsObserver: NSObjectProtocol?
 
     init(defaults: UserDefaults = .standard, autoScan: Bool = true) {
         self.defaults = defaults
@@ -402,6 +410,16 @@ struct RootGridMetrics: Equatable, Sendable {
             scan()
         }
         refreshBackgroundImage()
+        accessibilityOptionsObserver = NotificationCenter.default.addObserver(
+            forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.reducesTransparency = NSWorkspace.shared
+                    .accessibilityDisplayShouldReduceTransparency
+            }
+        }
     }
 
     var resolvedLanguage: String {
@@ -641,11 +659,12 @@ struct RootGridMetrics: Equatable, Sendable {
     func goToPage(_ page: Int, initialVelocity: Double = 0) {
         let destination = min(max(0, page), pageCount - 1)
         guard destination != currentPage else { return }
-        let animation = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-            ? nil
-            : LaunchpadPageMotion.animation(initialVelocity: initialVelocity)
-        withAnimation(animation) {
-            currentPage = destination
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            animateReducedMotionPageSwap { currentPage = destination }
+        } else {
+            withAnimation(LaunchpadPageMotion.animation(initialVelocity: initialVelocity)) {
+                currentPage = destination
+            }
         }
     }
 
@@ -665,12 +684,20 @@ struct RootGridMetrics: Equatable, Sendable {
     func goToFolderPage(_ page: Int, initialVelocity: Double = 0) {
         let destination = min(max(0, page), folderPageCount - 1)
         guard destination != folderPage else { return }
-        let animation = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-            ? nil
-            : LaunchpadPageMotion.animation(initialVelocity: initialVelocity)
-        withAnimation(animation) {
-            folderPage = destination
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            animateReducedMotionPageSwap { folderPage = destination }
+        } else {
+            withAnimation(LaunchpadPageMotion.animation(initialVelocity: initialVelocity)) {
+                folderPage = destination
+            }
         }
+    }
+
+    private func animateReducedMotionPageSwap(_ swap: () -> Void) {
+        withAnimation(.easeInOut(duration: LaunchpadPageMotion.reducedMotionDuration)) {
+            pageSwapGeneration &+= 1
+        }
+        swap()
     }
 
     func navigateVisiblePages(by delta: Int) {
@@ -750,6 +777,110 @@ struct RootGridMetrics: Equatable, Sendable {
         groups[index].appPaths.removeAll { $0 == sourcePath }
         let insertion = min(targetIndex, groups[index].appPaths.count)
         groups[index].appPaths.insert(sourcePath, at: insertion)
+    }
+
+    func reorderToPageEnd(_ sourceID: String, page: Int, pageSize: Int) {
+        guard sourceID.count <= 4_200, pageSize > 0 else { return }
+        let identifiers = rootEntries.map(\.id)
+        guard identifiers.contains(sourceID) else { return }
+        let start = min(max(0, page) * pageSize, identifiers.count)
+        let end = min(start + pageSize, identifiers.count)
+        let anchor = identifiers[start..<end].last(where: { $0 != sourceID })
+        var order = identifiers
+        order.removeAll { $0 == sourceID }
+        if let anchor, let anchorIndex = order.firstIndex(of: anchor) {
+            order.insert(sourceID, at: anchorIndex + 1)
+        } else {
+            order.insert(sourceID, at: min(order.count, start))
+        }
+        rootOrder = order
+    }
+
+    func reorderInOpenGroupToPageEnd(_ sourceID: String, page: Int, capacity: Int) {
+        guard sourceID.count <= 4_200, sourceID.hasPrefix("app:"), capacity > 0,
+              let groupID = openGroupID,
+              let index = groups.firstIndex(where: { $0.id == groupID }) else { return }
+        let sourcePath = String(sourceID.dropFirst(4))
+        let paths = groups[index].appPaths
+        guard paths.contains(sourcePath) else { return }
+        let start = min(max(0, page) * capacity, paths.count)
+        let end = min(start + capacity, paths.count)
+        let anchor = paths[start..<end].last(where: { $0 != sourcePath })
+        groups[index].appPaths.removeAll { $0 == sourcePath }
+        if let anchor, let anchorIndex = groups[index].appPaths.firstIndex(of: anchor) {
+            groups[index].appPaths.insert(sourcePath, at: anchorIndex + 1)
+        } else {
+            groups[index].appPaths.insert(sourcePath, at: min(groups[index].appPaths.count, start))
+        }
+    }
+
+    func startReorderDrag() {
+        resetReorderEdgeHover()
+        guard reorderDragTimer == nil else { return }
+        let timer = Timer(timeInterval: 0.08, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.tickReorderDrag() }
+        }
+        RunLoop.main.add(timer, forMode: .default)
+        RunLoop.main.add(timer, forMode: .eventTracking)
+        reorderDragTimer = timer
+    }
+
+    private func endReorderDrag() {
+        reorderDragTimer?.invalidate()
+        reorderDragTimer = nil
+        resetReorderEdgeHover()
+    }
+
+    private func tickReorderDrag() {
+        if (NSEvent.pressedMouseButtons & 1) == 0 {
+            endReorderDrag()
+            return
+        }
+        guard let window = registeredLauncherWindow ?? launcherWindow() else { return }
+        let frame = window.frame
+        let mouse = NSEvent.mouseLocation
+        guard frame.contains(mouse) else {
+            resetReorderEdgeHover()
+            return
+        }
+        let localX = mouse.x - frame.minX
+        let localY = mouse.y - frame.minY
+        let edgeWidth: CGFloat = 56
+        let searchAreaHeight: CGFloat = 96
+        guard localY < frame.height - searchAreaHeight else {
+            resetReorderEdgeHover()
+            return
+        }
+        if localX < edgeWidth {
+            advanceReorderEdgeHover(direction: -1)
+        } else if localX > frame.width - edgeWidth {
+            advanceReorderEdgeHover(direction: 1)
+        } else {
+            resetReorderEdgeHover()
+        }
+    }
+
+    private func advanceReorderEdgeHover(direction: Int) {
+        let now = Date()
+        if reorderEdgeHoverDirection != direction {
+            reorderEdgeHoverDirection = direction
+            reorderEdgeHoverStartDate = now
+            return
+        }
+        guard let start = reorderEdgeHoverStartDate,
+              now.timeIntervalSince(start) >= 0.45 else { return }
+        reorderEdgeHoverStartDate = now
+        if openGroupID == nil {
+            guard search.isEmpty else { return }
+            changePage(by: direction)
+        } else {
+            goToFolderPage(folderPage + direction)
+        }
+    }
+
+    private func resetReorderEdgeHover() {
+        reorderEdgeHoverDirection = nil
+        reorderEdgeHoverStartDate = nil
     }
 
     func deletePendingApplication() {
@@ -917,6 +1048,12 @@ struct RootGridMetrics: Equatable, Sendable {
         backgroundLoadTask?.cancel()
         cacheMaintenanceTask?.cancel()
         initialIconPreloadTask?.cancel()
+        reorderDragTimer?.invalidate()
+        reorderDragTimer = nil
+        if let accessibilityOptionsObserver {
+            NotificationCenter.default.removeObserver(accessibilityOptionsObserver)
+        }
+        accessibilityOptionsObserver = nil
         iconImageCache.removeAllObjects()
         selectedBackgroundImage = nil
         requestedBackgroundPath = nil
