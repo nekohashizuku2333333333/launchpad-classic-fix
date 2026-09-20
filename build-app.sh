@@ -24,9 +24,11 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Framewor
 cp "$BIN" "$APP/Contents/MacOS/LauncherX"
 cp Info.plist "$APP/Contents/Info.plist"
 ditto --norsrc --noqtn "$SPARKLE_FRAMEWORK" "$APP/Contents/Frameworks/Sparkle.framework"
-MASTER_ICON="$PWD/.build/AppIcon-1024.png"
-ICON_GENERATOR="$PWD/.build/GenerateAppIcon"
-swiftc Tools/GenerateAppIcon.swift -o "$ICON_GENERATOR" -framework AppKit
-"$ICON_GENERATOR" "$MASTER_ICON" "$APP/Contents/Resources/AppIcon.icns"
+ICON_SOURCE="$PWD/AppIcon.icns"
+if [[ ! -f "$ICON_SOURCE" ]]; then
+  echo "AppIcon.icns is missing." >&2
+  exit 1
+fi
+ditto --norsrc --noqtn "$ICON_SOURCE" "$APP/Contents/Resources/AppIcon.icns"
 codesign --force --deep --sign - "$APP"
 echo "$APP"

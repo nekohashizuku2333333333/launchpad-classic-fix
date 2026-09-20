@@ -18,7 +18,7 @@ struct ContentView: View {
                     .onTapGesture { model.dismissLauncher() }
                 ScrollWheelMonitor { model.navigateVisiblePages(by: $0) }
                 VStack(spacing: 0) {
-                    searchField.padding(.top, 34)
+                    searchField.padding(.top, 80)
                     PagedAppGrid()
                 }
                 if let group = model.group(for: model.openGroupID) {
