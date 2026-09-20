@@ -1032,27 +1032,27 @@ struct FolderTitleEditor: View {
     @EnvironmentObject var model: LauncherModel
     let groupID: UUID
     let initialName: String
-    @FocusState private var isEditing: Bool
+    @FocusState private var isFieldFocused: Bool
+    @State private var isEditing = false
     @State private var draftName = ""
 
     var body: some View {
         HStack(spacing: 8) {
-            if isEditing {
-                TextField(
-                    model.text("Folder Name", "フォルダ名", "資料夾名稱"),
-                    text: $draftName
-                )
-                .textFieldStyle(.plain)
-                .font(.system(size: 24, weight: .semibold))
-                .multilineTextAlignment(.center)
-                .lineLimit(1)
-                .focused($isEditing)
-                .onSubmit { commitRename() }
-                .onExitCommand {
-                    draftName = ""
-                    isEditing = false
-                }
-            } else {
+            TextField(
+                model.text("Folder Name", "フォルダ名", "資料夾名稱"),
+                text: $draftName
+            )
+            .textFieldStyle(.plain)
+            .font(.system(size: 24, weight: .semibold))
+            .multilineTextAlignment(.center)
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .focused($isFieldFocused)
+            .opacity(isEditing ? 1 : 0)
+            .disabled(!isEditing)
+            .onSubmit { endEditing(commit: true) }
+
+            if !isEditing {
                 HStack(spacing: 8) {
                     Text(currentName)
                         .font(.system(size: 24, weight: .semibold))
@@ -1070,8 +1070,13 @@ struct FolderTitleEditor: View {
         .padding(.horizontal, 12)
         .frame(width: 420, height: 42)
         .background(.black.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
-        .onChange(of: isEditing) { wasEditing, isNowEditing in
-            if wasEditing && !isNowEditing { commitRename() }
+        .onExitCommand {
+            if isEditing { endEditing(commit: false) }
+        }
+        .onChange(of: isFieldFocused) { wasFocused, isFocused in
+            if wasFocused && !isFocused && isEditing {
+                endEditing(commit: true)
+            }
         }
         .accessibilityLabel(model.text("Rename Folder", "フォルダ名を変更", "重新命名資料夾"))
         .accessibilityHint(model.text(
@@ -1087,15 +1092,24 @@ struct FolderTitleEditor: View {
     }
 
     private func beginEditing() {
+        guard !isEditing else { return }
         draftName = currentName
         isEditing = true
+        DispatchQueue.main.async {
+            isFieldFocused = true
+        }
     }
 
-    private func commitRename() {
-        let trimmed = draftName.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmed.isEmpty, trimmed != currentName {
-            model.renameGroup(groupID, to: trimmed)
-            model.finalizeGroupName(groupID)
+    private func endEditing(commit: Bool) {
+        guard isEditing else { return }
+        isEditing = false
+        isFieldFocused = false
+        if commit {
+            let trimmed = draftName.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty, trimmed != currentName {
+                model.renameGroup(groupID, to: trimmed)
+                model.finalizeGroupName(groupID)
+            }
         }
         draftName = ""
     }
