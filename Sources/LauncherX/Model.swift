@@ -738,8 +738,8 @@ struct RootGridMetrics: Equatable, Sendable {
     private func animateReducedMotionPageSwap(_ swap: () -> Void) {
         withAnimation(.easeInOut(duration: LaunchpadPageMotion.reducedMotionDuration)) {
             pageSwapGeneration &+= 1
+            swap()
         }
-        swap()
     }
 
     func navigateVisiblePages(by delta: Int) {
@@ -913,7 +913,7 @@ struct RootGridMetrics: Equatable, Sendable {
         reorderDragSourceID = sourceID
         resetReorderEdgeHover()
         guard reorderDragTimer == nil else { return }
-        let timer = Timer(timeInterval: 0.08, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 0.06, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tickReorderDrag() }
         }
         RunLoop.main.add(timer, forMode: .default)

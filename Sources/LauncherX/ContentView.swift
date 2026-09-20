@@ -17,9 +17,57 @@ struct FolderDisplayEntry: Identifiable {
     let app: AppItem?
 }
 
+struct EntryDragPreview: View {
+    let icon: NSImage?
+    let iconSize: Double
+
+    var body: some View {
+        Group {
+            if let icon {
+                Image(nsImage: icon)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+            } else {
+                Image(systemName: "app.dashed")
+                    .font(.system(size: iconSize * 0.4, weight: .light))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(width: iconSize, height: iconSize)
+        .shadow(color: .black.opacity(0.35), radius: 12, y: 6)
+    }
+}
+
+struct FolderDragPreview: View {
+    let icons: [NSImage]
+    let size: Double
+
+    var body: some View {
+        LazyVGrid(
+            columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 3),
+            spacing: 3
+        ) {
+            ForEach(0..<min(9, max(1, icons.count)), id: \.self) { index in
+                Image(nsImage: icons[index])
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+            }
+        }
+        .padding(8)
+        .frame(width: size, height: size)
+        .background(Color.black.opacity(0.35), in: RoundedRectangle(cornerRadius: size * 0.22))
+        .overlay(
+            RoundedRectangle(cornerRadius: size * 0.22)
+                .stroke(Color.white.opacity(0.3), lineWidth: 0.8)
+        )
+        .shadow(color: .black.opacity(0.35), radius: 12, y: 6)
+    }
+}
+
 struct ContentView: View {
     @EnvironmentObject var model: LauncherModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var didRevealContent = false
 
     var body: some View {
         GeometryReader { geometry in
@@ -36,6 +84,19 @@ struct ContentView: View {
                 VStack(spacing: 0) {
                     searchField.padding(.top, LaunchpadSearchFieldMetrics.topPadding)
                     PagedAppGrid()
+                }
+                .opacity(didRevealContent ? 1 : 0)
+                .scaleEffect(didRevealContent ? 1 : (reduceMotion ? 1 : 1.04))
+                .offset(y: didRevealContent ? 0 : (reduceMotion ? 0 : -12))
+                .onAppear { revealContent() }
+                .onChange(of: model.isLauncherVisible) { _, visible in
+                    if visible {
+                        revealContent()
+                    } else {
+                        var transaction = Transaction()
+                        transaction.disablesAnimations = true
+                        withTransaction(transaction) { didRevealContent = false }
+                    }
                 }
                 if let group = model.group(for: model.openGroupID) {
                     FolderOverlay(group: group).transition(
@@ -54,6 +115,7 @@ struct ContentView: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .allowsHitTesting(model.openGroupID == nil)
+                    .opacity(didRevealContent ? 1 : 0)
                     .zIndex(100)
                 }
             }
@@ -116,6 +178,11 @@ struct ContentView: View {
         .onExitCommand {
             if model.openGroupID != nil { model.closeFolder() } else { model.dismissLauncher() }
         }
+    }
+
+    private func revealContent() {
+        guard !didRevealContent else { return }
+        withAnimation(.easeOut(duration: 0.35)) { didRevealContent = true }
     }
 
     private var searchField: some View {
@@ -474,15 +541,19 @@ struct RootPagerCanvas: View {
                     .padding(.top, metrics.topInset)
                     .frame(width: pageWidth, height: pageHeight, alignment: .top)
                     .animation(
-                        reduceMotion ? nil : .easeInOut(duration: 0.24),
+                        reduceMotion ? .easeInOut(duration: 0.18) : .easeInOut(duration: 0.24),
                         value: Array(entries(on: page)).map(\.id)
                     )
                     .animation(
-                        reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.85),
+                        reduceMotion
+                            ? .easeInOut(duration: 0.18)
+                            : .spring(response: 0.3, dampingFraction: 0.85),
                         value: model.reorderPreview
                     )
                     .animation(
-                        reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.85),
+                        reduceMotion
+                            ? .easeInOut(duration: 0.18)
+                            : .spring(response: 0.3, dampingFraction: 0.85),
                         value: model.reorderDragSourceID
                     )
                     .transition(reduceMotion ? .opacity : .identity)
@@ -652,6 +723,8 @@ struct EntryTile: View {
             .onDrag {
                 model.startReorderDrag(entry.id)
                 return NSItemProvider(object: entry.id as NSString)
+            } preview: {
+                dragPreview
             }
             .dropDestination(for: String.self) { items, _ in
                 guard let sourceID = items.first else { return false }
@@ -684,6 +757,17 @@ struct EntryTile: View {
         guard let sourceID = items.first else { return false }
         model.reorder(sourceID, beside: entry.id, after: after)
         return true
+    }
+
+    private var dragPreview: some View {
+        let size = iconSize * 1.12
+        switch entry {
+        case .app(let app):
+            return AnyView(EntryDragPreview(icon: model.cachedIcon(for: app), iconSize: size))
+        case .group(let group):
+            let icons = model.apps(in: group).prefix(9).compactMap { model.cachedIcon(for: $0) }
+            return AnyView(FolderDragPreview(icons: Array(icons), size: size))
+        }
     }
 
     private var accessibilityLabel: String {
@@ -774,10 +858,7 @@ struct ApplicationArtwork: View {
         }
         .frame(width: size, height: size)
         .task(id: request) {
-            guard request.isLauncherVisible else {
-                state.releaseIcon()
-                return
-            }
+            guard model.isLauncherVisible else { return }
             guard state.prepareToLoad(appID: app.id) else { return }
             let loadedIcon = await model.loadIcon(for: app)
             guard !Task.isCancelled, model.isLauncherVisible else { return }
@@ -952,44 +1033,73 @@ struct FolderTitleEditor: View {
     @EnvironmentObject var model: LauncherModel
     let groupID: UUID
     let initialName: String
-    @StateObject private var renameCoordinator = FolderRenamePanelCoordinator()
+    @FocusState private var isEditing: Bool
+    @State private var draftName = ""
 
     var body: some View {
-        Button {
-            renameCoordinator.present(
-                groupID: groupID,
-                currentName: currentName,
-                model: model
-            )
-        } label: {
-            HStack(spacing: 8) {
-                Text(currentName)
-                    .font(.system(size: 24, weight: .semibold))
-                    .lineLimit(1)
-                Image(systemName: "pencil.circle.fill")
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(.secondary)
+        HStack(spacing: 8) {
+            if isEditing {
+                TextField(
+                    model.text("Folder Name", "フォルダ名", "資料夾名稱"),
+                    text: $draftName
+                )
+                .textFieldStyle(.plain)
+                .font(.system(size: 24, weight: .semibold))
+                .multilineTextAlignment(.center)
+                .lineLimit(1)
+                .focused($isEditing)
+                .onSubmit { commitRename() }
+                .onExitCommand {
+                    draftName = ""
+                    isEditing = false
+                }
+            } else {
+                HStack(spacing: 8) {
+                    Text(currentName)
+                        .font(.system(size: 24, weight: .semibold))
+                        .lineLimit(1)
+                    Image(systemName: "pencil.circle.fill")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity)
+                .contentShape(Rectangle())
+                .onTapGesture { beginEditing() }
             }
-            .frame(maxWidth: .infinity)
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .disabled(renameCoordinator.isPresenting)
-        .accessibilityLabel(model.text("Rename Folder", "フォルダ名を変更", "重新命名資料夾"))
-        .accessibilityHint(model.text(
-            "Opens the folder name dialog",
-            "フォルダ名の変更画面を開きます",
-            "開啟資料夾名稱對話框"
-        ))
+        .frame(maxWidth: .infinity)
         .padding(.horizontal, 12)
         .frame(width: 420, height: 42)
         .background(.black.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+        .onChange(of: isEditing) { wasEditing, isNowEditing in
+            if wasEditing && !isNowEditing { commitRename() }
+        }
+        .accessibilityLabel(model.text("Rename Folder", "フォルダ名を変更", "重新命名資料夾"))
+        .accessibilityHint(model.text(
+            "Tap the folder name to edit it",
+            "フォルダ名をタップして編集します",
+            "點按資料夾名稱即可編輯"
+        ))
+        .accessibilityAddTraits(.isButton)
     }
 
     private var currentName: String {
         model.group(for: groupID)?.name ?? initialName
     }
 
+    private func beginEditing() {
+        draftName = currentName
+        isEditing = true
+    }
+
+    private func commitRename() {
+        let trimmed = draftName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty, trimmed != currentName {
+            model.renameGroup(groupID, to: trimmed)
+            model.finalizeGroupName(groupID)
+        }
+        draftName = ""
+    }
 }
 
 final class FolderRenamePanel: NSPanel {
@@ -1346,11 +1456,11 @@ struct FolderAppGrid: View {
             }
         }
         .animation(
-            reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.85),
+            reduceMotion ? .easeInOut(duration: 0.18) : .spring(response: 0.3, dampingFraction: 0.85),
             value: model.reorderPreview
         )
         .animation(
-            reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.85),
+            reduceMotion ? .easeInOut(duration: 0.18) : .spring(response: 0.3, dampingFraction: 0.85),
             value: model.reorderDragSourceID
         )
         .frame(width: gridWidth, alignment: .topLeading)
@@ -1370,6 +1480,8 @@ struct FolderAppTile: View {
             .onDrag {
                 model.startReorderDrag(app.id)
                 return NSItemProvider(object: app.id as NSString)
+            } preview: {
+                EntryDragPreview(icon: model.cachedIcon(for: app), iconSize: model.iconSize * 1.12)
             }
             .dropDestination(for: String.self) { items, _ in
                 guard let sourceID = items.first else { return false }
