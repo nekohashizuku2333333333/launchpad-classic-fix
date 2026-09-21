@@ -1218,10 +1218,14 @@ struct FolderSplitLayer: View {
         Color.clear
             .frame(width: width, height: height)
             .contentShape(Rectangle())
-            .offset(x: x, y: y)
+            .position(x: x + width / 2, y: y + height / 2)
+            .onTapGesture { model.closeFolder() }
             .dropDestination(for: String.self) { items, location in
                 guard width > 0, height > 0, let sourceID = items.first else { return false }
-                let canvasPoint = CGPoint(x: x + location.x, y: y + location.y)
+                let canvasPoint = CGPoint(
+                    x: x + location.x,
+                    y: y + location.y
+                )
                 let slot = rootSlot(at: canvasPoint)
                 return model.moveOutOfOpenGroupToSlot(
                     sourceID,

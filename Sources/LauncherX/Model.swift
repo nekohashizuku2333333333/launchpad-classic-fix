@@ -1152,12 +1152,6 @@ final class FolderPagerState: ObservableObject {
         let column = min(max(0, Int(dx / columnStride)), layout.columnCount - 1)
         let row = min(max(0, Int(dy / rowStride)), rowCount - 1)
         let cellDX = dx - Double(column) * columnStride - layout.cellWidth / 2
-        let cellDY = dy - Double(row) * rowStride
-        let iconHalf = iconSize / 2
-        if abs(cellDX) < iconHalf, cellDY >= -4, cellDY <= layout.itemHeight + 4 {
-            reorderPreview = nil
-            return
-        }
         let pageCount = max(1, Int(ceil(Double(group.appPaths.count) / Double(layout.capacity))))
         let page = min(folderPager.displayedPage, pageCount - 1)
         let slot = min(
