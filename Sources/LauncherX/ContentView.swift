@@ -47,10 +47,20 @@ struct FolderDragPreview: View {
             columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 3),
             spacing: 3
         ) {
-            ForEach(0..<min(9, max(1, icons.count)), id: \.self) { index in
-                Image(nsImage: icons[index])
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
+            ForEach(0..<Self.previewSlotCount(iconCount: icons.count), id: \.self) { index in
+                if icons.indices.contains(index) {
+                    Image(nsImage: icons[index])
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                } else {
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(Color.white.opacity(0.16))
+                        .overlay {
+                            Image(systemName: "app.dashed")
+                                .font(.system(size: max(8, size * 0.09), weight: .light))
+                                .foregroundStyle(.white.opacity(0.45))
+                        }
+                }
             }
         }
         .padding(8)
@@ -61,6 +71,10 @@ struct FolderDragPreview: View {
                 .stroke(Color.white.opacity(0.3), lineWidth: 0.8)
         )
         .shadow(color: .black.opacity(0.35), radius: 12, y: 6)
+    }
+
+    nonisolated static func previewSlotCount(iconCount: Int) -> Int {
+        min(9, max(1, iconCount))
     }
 }
 
@@ -583,7 +597,10 @@ struct RootPagerCanvas: View {
                     FolderSplitLayer(
                         split: split,
                         canvasWidth: pageWidth,
-                        canvasHeight: pageHeight
+                        canvasHeight: pageHeight,
+                        rootMetrics: metrics,
+                        rootPageSize: pageSize,
+                        activePage: activePage
                     )
                     .transition(.opacity)
                     .zIndex(10)
@@ -1132,28 +1149,107 @@ final class ApplicationArtworkState: ObservableObject {
     }
 }
 
-/// Classic inline folder expansion: a full-canvas catcher closes the folder
-/// (and accepts drops that move an app out of it), while the expanded
-/// content sits in the gap the page opened at the folder's row. It belongs
-/// to the same Launchpad page visually — no separate floating window.
+/// Classic inline folder expansion: a full-canvas catcher closes the folder,
+/// while drop targets are split so the folder band itself always accepts
+/// apps into the folder and only the area outside the band moves apps out.
+/// It belongs to the same Launchpad page visually — no separate floating
+/// window.
 struct FolderSplitLayer: View {
     @EnvironmentObject var model: LauncherModel
     let split: FolderSplitState
     let canvasWidth: CGFloat
     let canvasHeight: CGFloat
+    let rootMetrics: LaunchpadLayoutMetrics
+    let rootPageSize: Int
+    let activePage: Int
 
     var body: some View {
         Color.clear
             .contentShape(Rectangle())
             .onTapGesture { model.closeFolder() }
-            .dropDestination(for: String.self) { items, _ in
-                guard let sourceID = items.first else { return false }
-                model.moveOutOfOpenGroup(sourceID)
-                return true
-            }
+
+        outsideBandDropRegions
 
         FolderExpandedBand(split: split, canvasWidth: canvasWidth, canvasHeight: canvasHeight)
             .position(x: canvasWidth / 2, y: split.bandCenterY)
+    }
+
+    private var outsideBandDropRegions: some View {
+        let bandMinX = (canvasWidth - split.bandWidth) / 2
+        let bandMaxX = bandMinX + split.bandWidth
+        let bandMinY = split.bandCenterY - split.bandHeight / 2
+        let bandMaxY = bandMinY + split.bandHeight
+
+        return ZStack(alignment: .topLeading) {
+            outsideDropRegion(
+                x: 0,
+                y: 0,
+                width: canvasWidth,
+                height: max(0, bandMinY)
+            )
+            outsideDropRegion(
+                x: 0,
+                y: bandMaxY,
+                width: canvasWidth,
+                height: max(0, canvasHeight - bandMaxY)
+            )
+            outsideDropRegion(
+                x: 0,
+                y: bandMinY,
+                width: max(0, bandMinX),
+                height: split.bandHeight
+            )
+            outsideDropRegion(
+                x: bandMaxX,
+                y: bandMinY,
+                width: max(0, canvasWidth - bandMaxX),
+                height: split.bandHeight
+            )
+        }
+        .frame(width: canvasWidth, height: canvasHeight, alignment: .topLeading)
+    }
+
+    private func outsideDropRegion(
+        x: CGFloat,
+        y: CGFloat,
+        width: CGFloat,
+        height: CGFloat
+    ) -> some View {
+        Color.clear
+            .frame(width: width, height: height)
+            .contentShape(Rectangle())
+            .offset(x: x, y: y)
+            .dropDestination(for: String.self) { items, location in
+                guard width > 0, height > 0, let sourceID = items.first else { return false }
+                let canvasPoint = CGPoint(x: x + location.x, y: y + location.y)
+                let slot = rootSlot(at: canvasPoint)
+                return model.moveOutOfOpenGroupToSlot(
+                    sourceID,
+                    page: activePage,
+                    slot: slot,
+                    pageSize: rootPageSize
+                )
+            }
+    }
+
+    private func rootSlot(at point: CGPoint) -> Int {
+        let gridOriginX = (canvasWidth - rootMetrics.gridWidth) / 2
+        let localX = Double(point.x) - gridOriginX
+        let localY = Double(point.y) - rootMetrics.topInset
+        let column = min(
+            max(0, Int(localX / rootMetrics.columnStride)),
+            rootMetrics.columns - 1
+        )
+        let row = min(
+            max(0, Int(localY / rootMetrics.rowStride)),
+            rootMetrics.rows - 1
+        )
+        let cellDX = localX - Double(column) * rootMetrics.columnStride
+            - rootMetrics.cellWidth / 2
+        return min(
+            max(0, row * rootMetrics.columns + column + (cellDX >= 0 ? 1 : 0)),
+            rootPageSize
+        )
     }
 }
 
@@ -1196,8 +1292,7 @@ struct FolderExpandedBand: View {
         .contentShape(Rectangle())
         .dropDestination(for: String.self) { items, _ in
             guard let sourceID = items.first else { return false }
-            model.addToOpenGroup(sourceID)
-            return true
+            return model.addToOpenGroup(sourceID)
         }
         .onAppear {
             model.setFolderPageCount(split.pageCount)
@@ -1571,19 +1666,20 @@ struct FolderPagerCanvas: View {
                 .dropDestination(for: String.self) { items, _ in
                     guard let sourceID = items.first else { return false }
                     if let preview = model.reorderPreview, model.openGroupID != nil {
-                        model.reorderInOpenGroupToSlot(
-                            sourceID,
-                            slot: preview.slot,
-                            capacity: capacity
-                        )
-                    } else {
-                        model.reorderInOpenGroupToPageEnd(
+                        return model.dropInOpenGroup(
                             sourceID,
                             page: min(folderPager.page, pageCount - 1),
-                            capacity: capacity
+                            capacity: capacity,
+                            slot: preview.slot
+                        )
+                    } else {
+                        return model.dropInOpenGroup(
+                            sourceID,
+                            page: min(folderPager.page, pageCount - 1),
+                            capacity: capacity,
+                            slot: nil
                         )
                     }
-                    return true
                 }
 
             ForEach(
@@ -1733,8 +1829,7 @@ struct FolderAppTile: View {
                 }
                 .dropDestination(for: String.self) { items, _ in
                     guard let sourceID = items.first else { return false }
-                    model.reorderInOpenGroup(sourceID, beside: app.id, after: false)
-                    return true
+                    return model.dropInOpenGroup(sourceID, beside: app.id, after: false)
                 }
                 .contextMenu {
                     Button(model.text("Remove from Folder", "フォルダから取り出す", "從資料夾移出")) {
@@ -1767,8 +1862,7 @@ struct FolderAppTile: View {
             .contentShape(Rectangle())
             .dropDestination(for: String.self) { items, _ in
                 guard let sourceID = items.first else { return false }
-                model.reorderInOpenGroup(sourceID, beside: app.id, after: after)
-                return true
+                return model.dropInOpenGroup(sourceID, beside: app.id, after: after)
             }
     }
 }

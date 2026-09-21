@@ -22,6 +22,9 @@ struct LauncherQualityTests {
             try dropInputValidationRejectsUnknownIdentifiers()
             try folderLifecyclePersistsSafely()
             try folderReorderingMatchesVisibleDropSlots()
+            try folderDragPreviewHandlesUncachedIcons()
+            try openFolderDropsAcceptExternalAppsAcrossInterior()
+            try openFolderAllowsMovingAppsOutToRootSlots()
             try await folderRenameControlsPersistExplicitly()
             try folderRemovalMatchesNativeLifecycle()
             try pageNavigationHandlesIntegerBoundaries()
@@ -46,7 +49,7 @@ struct LauncherQualityTests {
             try await hiddenLauncherRetainsPreparedIconsForReopening()
             try applicationUpdatePreservesUserLayout()
             try await fileOperatorRejectsUnsafeDeleteLocation()
-            print("Launcher quality tests passed (34/34)")
+            print("Launcher quality tests passed (37/37)")
         } catch {
             FileHandle.standardError.write(Data("Launcher quality tests failed: \(error)\n".utf8))
             Darwin.exit(EXIT_FAILURE)
@@ -339,6 +342,107 @@ struct LauncherQualityTests {
             ],
             "Dropping a folder app into an empty visible slot did not match the preview slot"
         )
+    }
+
+    private static func folderDragPreviewHandlesUncachedIcons() throws {
+        try require(
+            FolderDragPreview.previewSlotCount(iconCount: 0) == 1,
+            "A folder drag preview with no cached icons would render no safe placeholder"
+        )
+        try require(
+            FolderDragPreview.previewSlotCount(iconCount: 4) == 4,
+            "A folder drag preview changed the visible cached-icon count"
+        )
+        try require(
+            FolderDragPreview.previewSlotCount(iconCount: 12) == 9,
+            "A folder drag preview rendered more than nine mini icons"
+        )
+    }
+
+    private static func openFolderDropsAcceptExternalAppsAcrossInterior() throws {
+        let context = try makeDefaults()
+        defer { context.defaults.removePersistentDomain(forName: context.domain) }
+        let model = LauncherModel(defaults: context.defaults, autoScan: false)
+        let first = AppItem(url: URL(fileURLWithPath: "/Applications/First.app"))
+        let second = AppItem(url: URL(fileURLWithPath: "/Applications/Second.app"))
+        let third = AppItem(url: URL(fileURLWithPath: "/Applications/Third.app"))
+        let fourth = AppItem(url: URL(fileURLWithPath: "/Applications/Fourth.app"))
+        let group = AppGroup(name: "Folder", appPaths: [first.url.path, second.url.path])
+        model.apps = [first, second, third, fourth]
+        model.groups = [group]
+        model.open(group)
+
+        try require(
+            model.dropInOpenGroup(third.id, page: 0, capacity: 9, slot: nil),
+            "Dropping an external app on the open folder grid was not accepted"
+        )
+        try require(
+            model.groups.first?.appPaths == [first.url.path, second.url.path, third.url.path],
+            "Dropping an external app on the open folder grid did not add it to the folder"
+        )
+
+        try require(
+            model.dropInOpenGroup(fourth.id, beside: second.id, after: false),
+            "Dropping an external app on an open folder app tile was not accepted"
+        )
+        try require(
+            model.groups.first?.appPaths == [
+                first.url.path,
+                fourth.url.path,
+                second.url.path,
+                third.url.path
+            ],
+            "Dropping an external app on an open folder app tile did not insert it into the folder"
+        )
+    }
+
+    private static func openFolderAllowsMovingAppsOutToRootSlots() throws {
+        let context = try makeDefaults()
+        defer { context.defaults.removePersistentDomain(forName: context.domain) }
+        let model = LauncherModel(defaults: context.defaults, autoScan: false)
+        let first = AppItem(url: URL(fileURLWithPath: "/Applications/First.app"))
+        let second = AppItem(url: URL(fileURLWithPath: "/Applications/Second.app"))
+        let loose = AppItem(url: URL(fileURLWithPath: "/Applications/Loose.app"))
+        let group = AppGroup(name: "Folder", appPaths: [first.url.path, second.url.path])
+        model.apps = [first, second, loose]
+        model.groups = [group]
+        model.rootOrder = ["group:" + group.id.uuidString, loose.id]
+        model.open(group)
+
+        try require(
+            model.moveOutOfOpenGroupToSlot(second.id, page: 0, slot: 1, pageSize: 9),
+            "Dropping a folder app onto the root grid was not accepted"
+        )
+        try require(
+            model.rootEntries.map(\.id) == [first.id, second.id, loose.id],
+            "A dissolved folder app did not land at the requested root slot"
+        )
+        try require(model.openGroupID == nil, "A dissolved folder stayed open after dragging an app out")
+
+        let third = AppItem(url: URL(fileURLWithPath: "/Applications/Third.app"))
+        let fourth = AppItem(url: URL(fileURLWithPath: "/Applications/Fourth.app"))
+        let persistentGroup = AppGroup(
+            name: "Folder",
+            appPaths: [first.url.path, third.url.path, fourth.url.path]
+        )
+        model.apps = [first, third, fourth, loose, second]
+        model.groups = [persistentGroup]
+        model.rootOrder = [loose.id, "group:" + persistentGroup.id.uuidString, second.id]
+        model.open(persistentGroup)
+
+        try require(
+            model.moveOutOfOpenGroupToSlot(third.id, page: 0, slot: 0, pageSize: 9),
+            "Dropping a folder app before root entries was not accepted"
+        )
+        try require(
+            model.rootEntries.map(\.id).prefix(3) == [
+                third.id,
+                loose.id,
+                "group:" + persistentGroup.id.uuidString
+            ],
+            "A folder app dragged out did not insert at the requested root position"
+        )
+        try require(model.openGroupID == persistentGroup.id, "A folder with multiple remaining apps closed unexpectedly")
     }
 
     private static func folderRemovalMatchesNativeLifecycle() throws {
