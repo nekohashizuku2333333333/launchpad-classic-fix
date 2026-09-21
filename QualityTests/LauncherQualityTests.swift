@@ -21,6 +21,7 @@ struct LauncherQualityTests {
             try duplicateRuntimeOrderDoesNotCrashOrLoseEntries()
             try dropInputValidationRejectsUnknownIdentifiers()
             try folderLifecyclePersistsSafely()
+            try folderReorderingMatchesVisibleDropSlots()
             try await folderRenameControlsPersistExplicitly()
             try folderRemovalMatchesNativeLifecycle()
             try pageNavigationHandlesIntegerBoundaries()
@@ -45,7 +46,7 @@ struct LauncherQualityTests {
             try await hiddenLauncherRetainsPreparedIconsForReopening()
             try applicationUpdatePreservesUserLayout()
             try await fileOperatorRejectsUnsafeDeleteLocation()
-            print("Launcher quality tests passed (33/33)")
+            print("Launcher quality tests passed (34/34)")
         } catch {
             FileHandle.standardError.write(Data("Launcher quality tests failed: \(error)\n".utf8))
             Darwin.exit(EXIT_FAILURE)
@@ -286,6 +287,58 @@ struct LauncherQualityTests {
         try require(model.rootEntries.contains(.app(first)), "Removed app did not return to the root page")
         try require(model.groups.isEmpty, "A folder with one remaining application was not dissolved")
         try require(model.openGroupID == nil, "A dissolved folder remained open")
+    }
+
+    private static func folderReorderingMatchesVisibleDropSlots() throws {
+        let context = try makeDefaults()
+        defer { context.defaults.removePersistentDomain(forName: context.domain) }
+        let model = LauncherModel(defaults: context.defaults, autoScan: false)
+        let apps = (0..<6).map { AppItem(url: URL(fileURLWithPath: "/Applications/App\($0).app")) }
+        let group = AppGroup(name: "Folder", appPaths: apps.map(\.url.path))
+        model.apps = apps
+        model.groups = [group]
+        model.open(group)
+
+        model.reorderInOpenGroup(apps[0].id, beside: apps[3].id, after: true)
+        try require(
+            model.groups.first?.appPaths == [
+                apps[1].url.path,
+                apps[2].url.path,
+                apps[3].url.path,
+                apps[0].url.path,
+                apps[4].url.path,
+                apps[5].url.path
+            ],
+            "Dragging an earlier folder app after a later app landed in the wrong slot"
+        )
+
+        model.reorderInOpenGroup(apps[5].id, beside: apps[2].id, after: false)
+        try require(
+            model.groups.first?.appPaths == [
+                apps[1].url.path,
+                apps[5].url.path,
+                apps[2].url.path,
+                apps[3].url.path,
+                apps[0].url.path,
+                apps[4].url.path
+            ],
+            "Dragging a later folder app before an earlier app landed in the wrong slot"
+        )
+
+        model.setFolderPageCount(2)
+        model.setFolderPage(0)
+        model.reorderInOpenGroupToSlot(apps[4].id, slot: 4, capacity: 9)
+        try require(
+            model.groups.first?.appPaths == [
+                apps[1].url.path,
+                apps[5].url.path,
+                apps[2].url.path,
+                apps[3].url.path,
+                apps[4].url.path,
+                apps[0].url.path
+            ],
+            "Dropping a folder app into an empty visible slot did not match the preview slot"
+        )
     }
 
     private static func folderRemovalMatchesNativeLifecycle() throws {

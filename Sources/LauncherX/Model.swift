@@ -203,6 +203,7 @@ final class FolderPagerState: ObservableObject {
     @Published var page = 0
     @Published var displayedPage = 0
     @Published var pageCount = 1
+    @Published var reducedMotionPageHidden = false
 }
 
 @MainActor final class LauncherModel: ObservableObject {
@@ -296,7 +297,10 @@ final class FolderPagerState: ObservableObject {
     private var reorderEdgeHoverDirection: Int?
     private var reorderEdgeHoverStartDate: Date?
     private var reorderEdgeHoverHasFlipped = false
+    private var reorderFolderHoverID: UUID?
+    private var reorderFolderHoverStartDate: Date?
     private var reducedMotionSwapTimer: Timer?
+    private var folderReducedMotionSwapTimer: Timer?
     private var accessibilityOptionsObserver: NSObjectProtocol?
     private var squareIconPaths: Set<String> = []
     private var rootPagerLayoutInfo: RootPagerLayoutInfo?
@@ -519,7 +523,11 @@ final class FolderPagerState: ObservableObject {
     func open(_ group: AppGroup) {
         guard groups.contains(where: { $0.id == group.id }) else { return }
         folderPager.page = 0
-        openGroupID = group.id
+        folderPager.displayedPage = 0
+        clearReorderPreview()
+        withAnimation(Self.folderVisibilityAnimation) {
+            openGroupID = group.id
+        }
     }
     func dismissLauncher(animated: Bool = true) {
         guard dismissalRequestID == nil else { return }
@@ -562,10 +570,15 @@ final class FolderPagerState: ObservableObject {
         releaseTransientImageResources()
     }
     func closeFolder() {
-        openGroupID = nil
+        withAnimation(Self.folderVisibilityAnimation) {
+            openGroupID = nil
+        }
         folderPager.page = 0
         folderPager.displayedPage = 0
         folderPager.pageCount = 1
+        folderPager.reducedMotionPageHidden = false
+        resetReorderFolderHover()
+        clearReorderPreview()
     }
     func group(for id: UUID?) -> AppGroup? { groups.first { $0.id == id } }
 
@@ -650,7 +663,7 @@ final class FolderPagerState: ObservableObject {
         guard destination != folderPager.page else { return }
         if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             folderPager.page = destination
-            animateReducedMotionPageSwap { self.folderPager.displayedPage = destination }
+            animateFolderReducedMotionPageSwap { self.folderPager.displayedPage = destination }
         } else {
             withAnimation(LaunchpadPageMotion.animation(initialVelocity: initialVelocity)) {
                 folderPager.page = destination
@@ -675,6 +688,33 @@ final class FolderPagerState: ObservableObject {
         RunLoop.main.add(timer, forMode: .default)
         RunLoop.main.add(timer, forMode: .eventTracking)
         reducedMotionSwapTimer = timer
+    }
+
+    private func animateFolderReducedMotionPageSwap(_ swap: @escaping @MainActor () -> Void) {
+        if !folderPager.reducedMotionPageHidden {
+            withAnimation(.easeOut(duration: 0.09)) { folderPager.reducedMotionPageHidden = true }
+        }
+        folderReducedMotionSwapTimer?.invalidate()
+        let timer = Timer(timeInterval: 0.1, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.folderReducedMotionSwapTimer = nil
+                swap()
+                withAnimation(.easeIn(duration: 0.16)) {
+                    self.folderPager.reducedMotionPageHidden = false
+                }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .default)
+        RunLoop.main.add(timer, forMode: .eventTracking)
+        folderReducedMotionSwapTimer = timer
+    }
+
+    private static var folderVisibilityAnimation: Animation? {
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            return .easeInOut(duration: LaunchpadPageMotion.reducedMotionDuration)
+        }
+        return .spring(response: 0.34, dampingFraction: 0.92)
     }
 
     func navigateVisiblePages(by delta: Int) {
@@ -709,6 +749,7 @@ final class FolderPagerState: ObservableObject {
             detachFromGroups(paths: [sourceApp.url.path])
             guard let index = groups.firstIndex(where: { $0.id == targetGroup.id }) else { break }
             if !groups[index].appPaths.contains(sourceApp.url.path) { groups[index].appPaths.append(sourceApp.url.path) }
+            open(groups[index])
         default: break
         }
         clearReorderDragState()
@@ -747,15 +788,23 @@ final class FolderPagerState: ObservableObject {
     }
 
     func reorderInOpenGroup(_ sourceID: String, before targetID: String) {
+        reorderInOpenGroup(sourceID, beside: targetID, after: false)
+    }
+
+    func reorderInOpenGroup(_ sourceID: String, beside targetID: String, after: Bool) {
         guard sourceID.count <= 4_200, targetID.count <= 4_200,
               sourceID.hasPrefix("app:"), targetID.hasPrefix("app:"), sourceID != targetID,
               let groupID = openGroupID, let index = groups.firstIndex(where: { $0.id == groupID }) else { return }
         let sourcePath = String(sourceID.dropFirst(4))
         let targetPath = String(targetID.dropFirst(4))
         guard groups[index].appPaths.contains(sourcePath),
-              let targetIndex = groups[index].appPaths.firstIndex(of: targetPath) else { return }
+              groups[index].appPaths.contains(targetPath) else { return }
         groups[index].appPaths.removeAll { $0 == sourcePath }
-        let insertion = min(targetIndex, groups[index].appPaths.count)
+        guard let targetIndex = groups[index].appPaths.firstIndex(of: targetPath) else { return }
+        let insertion = min(
+            targetIndex + (after ? 1 : 0),
+            groups[index].appPaths.count
+        )
         groups[index].appPaths.insert(sourcePath, at: insertion)
         clearReorderDragState()
     }
@@ -787,7 +836,11 @@ final class FolderPagerState: ObservableObject {
         let pageIDs = Array(identifiers[pageStart..<pageEnd])
         var order = identifiers
         order.removeAll { $0 == sourceID }
-        if slot < pageIDs.count,
+        if slot < pageSize {
+            let desiredIndex = min(pageStart + max(0, slot), identifiers.count)
+            let adjustedIndex = desiredIndex - identifiers[..<desiredIndex].filter { $0 == sourceID }.count
+            order.insert(sourceID, at: min(max(0, adjustedIndex), order.count))
+        } else if slot < pageIDs.count,
            let anchor = pageIDs[slot...].first(where: { $0 != sourceID }),
            let anchorIndex = order.firstIndex(of: anchor) {
             order.insert(sourceID, at: anchorIndex)
@@ -831,7 +884,14 @@ final class FolderPagerState: ObservableObject {
         let pageEnd = min(pageStart + capacity, paths.count)
         let pagePaths = Array(paths[pageStart..<pageEnd])
         groups[index].appPaths.removeAll { $0 == sourcePath }
-        if slot < pagePaths.count,
+        if slot < capacity {
+            let desiredIndex = min(pageStart + max(0, slot), paths.count)
+            let adjustedIndex = desiredIndex - paths[..<desiredIndex].filter { $0 == sourcePath }.count
+            groups[index].appPaths.insert(
+                sourcePath,
+                at: min(max(0, adjustedIndex), groups[index].appPaths.count)
+            )
+        } else if slot < pagePaths.count,
            let anchor = pagePaths[slot...].first(where: { $0 != sourcePath }),
            let anchorIndex = groups[index].appPaths.firstIndex(of: anchor) {
             groups[index].appPaths.insert(sourcePath, at: anchorIndex)
@@ -866,6 +926,11 @@ final class FolderPagerState: ObservableObject {
     func clearReorderDragState() {
         reorderPreview = nil
         reorderDragSourceID = nil
+        resetReorderFolderHover()
+    }
+
+    private func clearReorderPreview() {
+        reorderPreview = nil
     }
 
     func updateRootPagerLayout(
@@ -932,6 +997,7 @@ final class FolderPagerState: ObservableObject {
             resetReorderEdgeHover()
         }
         updateReorderPreview(localX: localX, localYFromTop: frame.height - localY)
+        updateFolderHoverOpen(localX: localX, localYFromTop: frame.height - localY)
     }
 
     private func updateReorderPreview(localX: Double, localYFromTop: Double) {
@@ -978,11 +1044,9 @@ final class FolderPagerState: ObservableObject {
         }
         let pageCount = max(1, Int(ceil(Double(rootEntries.count) / Double(layout.pageSize))))
         let page = min(displayedPage, pageCount - 1)
-        let pageStart = page * layout.pageSize
-        let countOnPage = min(layout.pageSize, max(0, rootEntries.count - pageStart))
         let slot = min(
             max(0, row * metrics.columns + column + (cellDX >= 0 ? 1 : 0)),
-            countOnPage
+            layout.pageSize
         )
         reorderPreview = LauncherReorderPreview(sourceID: sourceID, page: page, slot: slot)
     }
@@ -1016,13 +1080,66 @@ final class FolderPagerState: ObservableObject {
         }
         let pageCount = max(1, Int(ceil(Double(group.appPaths.count) / Double(layout.capacity))))
         let page = min(folderPager.displayedPage, pageCount - 1)
-        let pageStart = page * layout.capacity
-        let countOnPage = min(layout.capacity, max(0, group.appPaths.count - pageStart))
         let slot = min(
             max(0, row * layout.columnCount + column + (cellDX >= 0 ? 1 : 0)),
-            countOnPage
+            layout.capacity
         )
         reorderPreview = LauncherReorderPreview(sourceID: sourceID, page: page, slot: slot)
+    }
+
+    private func updateFolderHoverOpen(localX: Double, localYFromTop: Double) {
+        guard openGroupID == nil,
+              let sourceID = reorderDragSourceID,
+              sourceID.hasPrefix("app:"),
+              let layout = rootPagerLayoutInfo,
+              search.isEmpty else {
+            resetReorderFolderHover()
+            return
+        }
+        guard let hoveredGroup = groupEntryAt(localX: localX, localYFromTop: localYFromTop, layout: layout),
+              "group:" + hoveredGroup.id.uuidString != sourceID else {
+            resetReorderFolderHover()
+            return
+        }
+        let now = Date()
+        if reorderFolderHoverID != hoveredGroup.id {
+            reorderFolderHoverID = hoveredGroup.id
+            reorderFolderHoverStartDate = now
+            return
+        }
+        guard let start = reorderFolderHoverStartDate,
+              now.timeIntervalSince(start) >= 0.65 else { return }
+        open(hoveredGroup)
+        resetReorderFolderHover()
+    }
+
+    private func groupEntryAt(
+        localX: Double,
+        localYFromTop: Double,
+        layout: RootPagerLayoutInfo
+    ) -> AppGroup? {
+        let metrics = layout.metrics
+        let pagerY = localYFromTop - layout.topOffset
+        let gridOriginX = (layout.size.width - metrics.gridWidth) / 2
+        guard localX >= gridOriginX,
+              localX <= gridOriginX + metrics.gridWidth,
+              pagerY >= metrics.topInset,
+              pagerY <= metrics.topInset + metrics.gridHeight else { return nil }
+        let column = min(max(0, Int((localX - gridOriginX) / metrics.columnStride)), metrics.columns - 1)
+        let row = min(max(0, Int((pagerY - metrics.topInset) / metrics.rowStride)), metrics.rows - 1)
+        let slot = row * metrics.columns + column
+        let page = min(displayedPage, pageCount - 1)
+        let index = page * layout.pageSize + slot
+        guard rootEntries.indices.contains(index),
+              case .group(let group) = rootEntries[index] else { return nil }
+        let cellX = localX - gridOriginX - Double(column) * metrics.columnStride
+        let cellY = pagerY - metrics.topInset - Double(row) * metrics.rowStride
+        let iconMinX = (metrics.cellWidth - metrics.iconSize) / 2
+        let isInsideIcon = cellX >= iconMinX
+            && cellX <= iconMinX + metrics.iconSize
+            && cellY >= 0
+            && cellY <= metrics.iconSize
+        return isInsideIcon ? group : nil
     }
 
     private func advanceReorderEdgeHover(direction: Int) {
@@ -1050,6 +1167,11 @@ final class FolderPagerState: ObservableObject {
         reorderEdgeHoverDirection = nil
         reorderEdgeHoverStartDate = nil
         reorderEdgeHoverHasFlipped = false
+    }
+
+    private func resetReorderFolderHover() {
+        reorderFolderHoverID = nil
+        reorderFolderHoverStartDate = nil
     }
 
     func deletePendingApplication() {
@@ -1230,6 +1352,8 @@ final class FolderPagerState: ObservableObject {
         reorderDragTimer = nil
         reducedMotionSwapTimer?.invalidate()
         reducedMotionSwapTimer = nil
+        folderReducedMotionSwapTimer?.invalidate()
+        folderReducedMotionSwapTimer = nil
         if let accessibilityOptionsObserver {
             NotificationCenter.default.removeObserver(accessibilityOptionsObserver)
         }

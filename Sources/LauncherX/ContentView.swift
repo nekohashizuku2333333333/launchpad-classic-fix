@@ -156,12 +156,6 @@ struct ContentView: View {
                 "發生未知錯誤。"
             ))
         }
-        .animation(
-            reduceMotion
-                ? .easeInOut(duration: LaunchpadPageMotion.reducedMotionDuration)
-                : .spring(response: 0.42, dampingFraction: 0.9),
-            value: model.openGroupID
-        )
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.38), value: model.background)
         .animation(
             reduceMotion ? nil : .easeInOut(duration: 0.24),
@@ -479,6 +473,7 @@ struct PagedAppGrid: View {
 /// folder content occupies the gap between them.
 struct FolderSplitState: Equatable {
     let group: AppGroup
+    let folderApps: [AppItem]
     let row: Int
     let contentMetrics: LaunchpadLayoutMetrics
     let pageCount: Int
@@ -547,6 +542,7 @@ struct RootPagerCanvas: View {
                         }
                     )
                     .dropDestination(for: String.self) { items, _ in
+                        guard model.openGroupID == nil else { return false }
                         guard let sourceID = items.first else { return false }
                         if let preview = model.reorderPreview, model.openGroupID == nil {
                             model.reorderToSlot(
@@ -568,17 +564,18 @@ struct RootPagerCanvas: View {
                     ),
                     id: \.self
                 ) { page in
+                    let pageSplit = page == activePage ? split : nil
                     RootPageRows(
                         displayEntries: displayEntries(on: page),
                         metrics: metrics,
-                        split: split,
+                        split: pageSplit,
                         pageWidth: pageWidth
                     )
                     .offset(
                         x: CGFloat(page - activePage) * pageWidth
                             + dragOffset
                     )
-                    .allowsHitTesting(page == model.displayedPage && split == nil)
+                    .allowsHitTesting(page == model.displayedPage && split == nil && model.openGroupID == nil)
                     .compositingGroup()
                 }
 
@@ -588,9 +585,7 @@ struct RootPagerCanvas: View {
                         canvasWidth: pageWidth,
                         canvasHeight: pageHeight
                     )
-                    .transition(
-                        reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.97))
-                    )
+                    .transition(.opacity)
                     .zIndex(10)
                 }
             }
@@ -624,7 +619,8 @@ struct RootPagerCanvas: View {
               index / pageSize == activePage else { return nil }
 
         let folderRow = (index % pageSize) / metrics.columns
-        let itemCount = model.apps(in: group).count
+        let folderApps = model.apps(in: group)
+        let itemCount = folderApps.count
         let available = pageHeight - LaunchpadLayoutMetrics.bottomReserve
         var rowLimit = min(
             LaunchpadLayoutMetrics.folderMaximumRows,
@@ -677,6 +673,7 @@ struct RootPagerCanvas: View {
 
         return FolderSplitState(
             group: group,
+            folderApps: folderApps,
             row: folderRow,
             contentMetrics: content,
             pageCount: folderPageCount,
@@ -697,9 +694,11 @@ struct RootPagerCanvas: View {
         if let sourceID, model.openGroupID == nil,
            let preview = model.reorderPreview,
            preview.sourceID == sourceID, preview.page == page {
+            let visualSlot = preview.slot
+                - pageEntries.prefix(preview.slot).filter { $0.id == sourceID }.count
             result.insert(
                 LauncherDisplayEntry(id: "reorder-gap", entry: nil),
-                at: min(max(0, preview.slot), result.count)
+                at: min(max(0, visualSlot), result.count)
             )
         }
         return result
@@ -714,6 +713,7 @@ struct RootPagerCanvas: View {
     private func pageDragGesture(pageWidth: CGFloat) -> some Gesture {
         DragGesture(minimumDistance: 4)
             .onChanged { value in
+                guard model.openGroupID == nil else { return }
                 let horizontal = value.translation.width
                 let vertical = value.translation.height
                 guard abs(horizontal) > abs(vertical) else { return }
@@ -724,6 +724,10 @@ struct RootPagerCanvas: View {
                 dragOffset = min(max(horizontal * resistance, -limit), limit)
             }
             .onEnded { value in
+                guard model.openGroupID == nil else {
+                    dragOffset = 0
+                    return
+                }
                 let horizontal = value.translation.width
                 let vertical = value.translation.height
                 let projected = value.predictedEndTranslation.width
@@ -899,6 +903,7 @@ struct AppCell: View {
                 }
                 .dropDestination(for: String.self) { items, _ in
                     guard let sourceID = items.first else { return false }
+                    guard model.openGroupID == nil else { return false }
                     model.handleDrop(sourceID, on: entry)
                     return true
                 }
@@ -966,6 +971,7 @@ struct AppCell: View {
             .contentShape(Rectangle())
             .dropDestination(for: String.self) { items, _ in
                 guard let sourceID = items.first else { return false }
+                guard model.openGroupID == nil else { return false }
                 model.reorder(sourceID, beside: entry.id, after: after)
                 return true
             }
@@ -1165,7 +1171,7 @@ struct FolderExpandedBand: View {
 
             FolderPagerCanvas(
                 group: split.group,
-                folderApps: model.apps(in: split.group),
+                folderApps: split.folderApps,
                 capacity: split.contentMetrics.capacity,
                 pageCount: split.pageCount,
                 metrics: split.contentMetrics,
@@ -1206,15 +1212,23 @@ struct FolderExpandedBand: View {
     private var bandBackdrop: some View {
         let shape = RoundedRectangle(cornerRadius: FolderBandMetrics.cornerRadius, style: .continuous)
         return ZStack {
-            if model.reducesTransparency {
-                shape.fill(Color.black.opacity(0.5))
+            if usesStaticBackdrop {
+                shape.fill(Color.black.opacity(0.48))
             } else {
                 shape.fill(.ultraThinMaterial)
                 shape.fill(Color.black.opacity(0.16))
             }
         }
         .overlay(shape.stroke(Color.white.opacity(0.1), lineWidth: 0.8))
-        .shadow(color: .black.opacity(0.2), radius: 16, y: 5)
+        .shadow(
+            color: .black.opacity(usesStaticBackdrop ? 0.14 : 0.2),
+            radius: usesStaticBackdrop ? 8 : 16,
+            y: usesStaticBackdrop ? 3 : 5
+        )
+    }
+
+    private var usesStaticBackdrop: Bool {
+        model.reducesTransparency || split.pageCount > 1
     }
 
     private func reportFolderLayout() {
@@ -1244,7 +1258,7 @@ struct FolderTitleEditor: View {
     @State private var draftName = ""
 
     var body: some View {
-        HStack(spacing: 8) {
+        ZStack {
             TextField(
                 model.text("Folder Name", "フォルダ名", "資料夾名稱"),
                 text: $draftName
@@ -1255,6 +1269,7 @@ struct FolderTitleEditor: View {
             .lineLimit(1)
             .truncationMode(.tail)
             .focused($isFieldFocused)
+            .frame(maxWidth: .infinity)
             .opacity(isEditing ? 1 : 0)
             .disabled(!isEditing)
             .onSubmit { endEditing(commit: true) }
@@ -1593,7 +1608,7 @@ struct FolderPagerCanvas: View {
                 .compositingGroup()
             }
         }
-        .opacity(model.reducedMotionPageHidden ? 0 : 1)
+        .opacity(folderPager.reducedMotionPageHidden ? 0 : 1)
     }
 
     private func displayApps(on page: Int) -> [FolderDisplayEntry] {
@@ -1605,9 +1620,11 @@ struct FolderPagerCanvas: View {
         if let sourceID,
            let preview = model.reorderPreview,
            preview.sourceID == sourceID, preview.page == page {
+            let visualSlot = preview.slot
+                - pageApps.prefix(preview.slot).filter { $0.id == sourceID }.count
             result.insert(
                 FolderDisplayEntry(id: "reorder-gap", app: nil),
-                at: min(max(0, preview.slot), result.count)
+                at: min(max(0, visualSlot), result.count)
             )
         }
         return result
@@ -1704,33 +1721,55 @@ struct FolderAppTile: View {
     let metrics: LaunchpadLayoutMetrics
 
     var body: some View {
-        AppIconCellContent(app: app, metrics: metrics)
-            .contentShape(Rectangle())
-            .onTapGesture { model.launch(app) }
-            .onDrag {
-                model.startReorderDrag(app.id)
-                return NSItemProvider(object: app.id as NSString)
-            } preview: {
-                EntryDragPreview(icon: model.cachedIcon(for: app), iconSize: metrics.iconSize * 1.12)
-            }
-            .dropDestination(for: String.self) { items, _ in
-                guard let sourceID = items.first else { return false }
-                model.reorderInOpenGroup(sourceID, before: app.id)
-                return true
-            }
-            .contextMenu {
-                Button(model.text("Remove from Folder", "フォルダから取り出す", "從資料夾移出")) {
-                    model.remove(app, from: group)
+        ZStack {
+            AppIconCellContent(app: app, metrics: metrics)
+                .contentShape(Rectangle())
+                .onTapGesture { model.launch(app) }
+                .onDrag {
+                    model.startReorderDrag(app.id)
+                    return NSItemProvider(object: app.id as NSString)
+                } preview: {
+                    EntryDragPreview(icon: model.cachedIcon(for: app), iconSize: metrics.iconSize * 1.12)
+                }
+                .dropDestination(for: String.self) { items, _ in
+                    guard let sourceID = items.first else { return false }
+                    model.reorderInOpenGroup(sourceID, beside: app.id, after: false)
+                    return true
+                }
+                .contextMenu {
+                    Button(model.text("Remove from Folder", "フォルダから取り出す", "從資料夾移出")) {
+                        model.remove(app, from: group)
+                    }
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(app.name)
+                .accessibilityHint(model.text(
+                    "Opens the application",
+                    "アプリケーションを開きます",
+                    "開啟應用程式"
+                ))
+                .accessibilityAddTraits(.isButton)
+
+            if metrics.sideDropWidth > 1 {
+                HStack(spacing: 0) {
+                    sideDropZone(width: metrics.sideDropWidth, after: false)
+                    Spacer(minLength: 0)
+                    sideDropZone(width: metrics.sideDropWidth, after: true)
                 }
             }
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(app.name)
-            .accessibilityHint(model.text(
-                "Opens the application",
-                "アプリケーションを開きます",
-                "開啟應用程式"
-            ))
-            .accessibilityAddTraits(.isButton)
+        }
+        .frame(width: metrics.cellWidth, height: metrics.cellHeight)
+    }
+
+    private func sideDropZone(width: CGFloat, after: Bool) -> some View {
+        Color.clear
+            .frame(width: width)
+            .contentShape(Rectangle())
+            .dropDestination(for: String.self) { items, _ in
+                guard let sourceID = items.first else { return false }
+                model.reorderInOpenGroup(sourceID, beside: app.id, after: after)
+                return true
+            }
     }
 }
 

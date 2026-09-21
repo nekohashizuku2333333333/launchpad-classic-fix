@@ -20,8 +20,8 @@ struct ScrollWheelMonitor: NSViewRepresentable {
         private var accumulated: CGFloat = 0
         private var lastChange = Date.distantPast
         private var lastEvent = Date.distantPast
-        private var lastMovementSign = 0
-        private var suppressUntilGestureEnd = false
+        private var didPageDuringGesture = false
+        private var gestureAxis: ScrollAxis?
         private var rearmAt = Date.distantPast
 
         init(onPage: @escaping (Int) -> Void) { self.onPage = onPage }
@@ -46,25 +46,16 @@ struct ScrollWheelMonitor: NSViewRepresentable {
             let now = Date()
             defer { lastEvent = now }
 
-            let movement = abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY)
-                ? -event.scrollingDeltaX : -event.scrollingDeltaY
-            let sign = movement > 0.1 ? 1 : (movement < -0.1 ? -1 : 0)
-            if sign != 0, sign != lastMovementSign {
-                lastMovementSign = sign
-                if suppressUntilGestureEnd {
-                    suppressUntilGestureEnd = false
-                    accumulated = 0
-                }
-            }
-
             if now.timeIntervalSince(lastEvent) > 0.5 {
                 accumulated = 0
-                suppressUntilGestureEnd = false
+                didPageDuringGesture = false
+                gestureAxis = nil
             }
 
             if event.phase == .began {
                 accumulated = 0
-                suppressUntilGestureEnd = false
+                didPageDuringGesture = false
+                gestureAxis = nil
             }
 
             let gestureFinished = event.phase == .ended
@@ -72,24 +63,40 @@ struct ScrollWheelMonitor: NSViewRepresentable {
                 || event.momentumPhase == .ended
                 || event.momentumPhase == .cancelled
             if gestureFinished {
-                suppressUntilGestureEnd = false
                 accumulated = 0
                 if event.momentumPhase == .ended || event.momentumPhase == .cancelled {
                     rearmAt = now.addingTimeInterval(0.25)
+                    didPageDuringGesture = false
+                    gestureAxis = nil
                 }
                 return
             }
-            if suppressUntilGestureEnd || now < rearmAt { return }
+            if now < rearmAt { return }
 
-            accumulated += movement
             let isTraditionalWheel = event.phase.isEmpty && event.momentumPhase.isEmpty
-            guard abs(accumulated) >= 28 else { return }
+            if didPageDuringGesture && !isTraditionalWheel { return }
+
+            let movement = dominantMovement(from: event)
+            guard abs(movement) > 0.1 else { return }
+            accumulated += movement
+            guard abs(accumulated) >= (isTraditionalWheel ? 34 : 42) else { return }
             guard isTraditionalWheel ? now.timeIntervalSince(lastChange) > 0.3 : true else { return }
 
             onPage(accumulated > 0 ? 1 : -1)
             accumulated = 0
             lastChange = now
-            suppressUntilGestureEnd = true
+            didPageDuringGesture = !isTraditionalWheel
+        }
+
+        private func dominantMovement(from event: NSEvent) -> CGFloat {
+            let axis: ScrollAxis
+            if let lockedAxis = gestureAxis {
+                axis = lockedAxis
+            } else {
+                axis = abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY) ? .horizontal : .vertical
+                gestureAxis = axis
+            }
+            return axis == .horizontal ? -event.scrollingDeltaX : -event.scrollingDeltaY
         }
 
         func uninstall() {
@@ -97,6 +104,11 @@ struct ScrollWheelMonitor: NSViewRepresentable {
             monitor = nil
         }
     }
+}
+
+private enum ScrollAxis {
+    case horizontal
+    case vertical
 }
 
 private final class MousePassthroughView: NSView {
