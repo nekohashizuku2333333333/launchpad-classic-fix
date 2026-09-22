@@ -69,7 +69,8 @@ struct LauncherQualityTests {
             let searchTypingTestCount = try SearchTypingTests.run()
             let memoryResourceTestCount = try await MemoryResourceTests.run()
             let reorderContinuityTestCount = try ReorderContinuityTests.run()
-            let testCount = 49 + KeyboardEditingTests.count + storeTestCount + dragTestCount + displayTestCount + searchTypingTestCount + memoryResourceTestCount + reorderContinuityTestCount
+            let folderDragEntryCount = try FolderDragEntryTests.run()
+            let testCount = 49 + KeyboardEditingTests.count + storeTestCount + dragTestCount + displayTestCount + searchTypingTestCount + memoryResourceTestCount + reorderContinuityTestCount + folderDragEntryCount
             print("Launcher quality tests passed (\(testCount)/\(testCount))")
         } catch {
             FileHandle.standardError.write(Data("Launcher quality tests failed: \(error)\n".utf8))

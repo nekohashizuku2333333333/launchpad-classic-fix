@@ -1131,6 +1131,18 @@ struct FolderOverlay: View {
 
         FolderPanel(split: split, canvasWidth: canvasWidth, canvasHeight: canvasHeight)
             .position(x: canvasWidth / 2, y: split.bandCenterY)
+
+        // The title is above the panel, so it needs its own hit-test bounds.
+        // An offset panel overlay paints here but lets the outside region
+        // underneath receive the click and close the folder instead.
+        FolderTitleEditor(groupID: split.group.id, initialName: split.group.name)
+            .id(split.group.id)
+            .frame(width: split.bandWidth, height: FolderPanelMetrics.titleHeight)
+            .position(
+                x: canvasWidth / 2,
+                y: split.bandCenterY - split.bandHeight / 2
+                    - FolderPanelMetrics.titleSpacing - FolderPanelMetrics.titleHeight / 2
+            )
     }
 
     private var outsideBandDropRegions: some View {
@@ -1239,11 +1251,6 @@ struct FolderPanel: View {
         .padding(.horizontal, FolderPanelMetrics.horizontalPadding)
         .padding(.vertical, FolderPanelMetrics.verticalPadding)
         .frame(width: split.bandWidth, height: split.bandHeight)
-        .overlay(alignment: .top) {
-            FolderTitleEditor(groupID: split.group.id, initialName: split.group.name)
-                .frame(height: FolderPanelMetrics.titleHeight)
-                .offset(y: -FolderPanelMetrics.titleHeight - FolderPanelMetrics.titleSpacing)
-        }
         .background(bandBackdrop)
         .contentShape(Rectangle())
         .dropDestination(for: String.self) { items, _ in
@@ -1310,18 +1317,27 @@ struct FolderTitleEditor: View {
             .frame(maxWidth: .infinity)
             .opacity(isEditing ? 1 : 0)
             .disabled(!isEditing)
+            .accessibilityHidden(!isEditing)
+            .accessibilityLabel(model.text("Folder Name", "フォルダ名", "資料夾名稱"))
             .onSubmit { endEditing(commit: true) }
 
             if !isEditing {
-                HStack(spacing: 7) {
+                Button(action: beginEditing) {
                     Text(currentName)
                         .font(.system(size: 28, weight: .light))
                         .lineLimit(1)
                         .shadow(color: .black.opacity(0.6), radius: 2, y: 1)
+                        .frame(maxWidth: .infinity)
+                        .contentShape(Rectangle())
                 }
-                .frame(maxWidth: .infinity)
-                .contentShape(Rectangle())
-                .onTapGesture { beginEditing() }
+                .buttonStyle(.plain)
+                .accessibilityLabel(model.text("Rename Folder", "フォルダ名を変更", "重新命名資料夾"))
+                .accessibilityValue(currentName)
+                .accessibilityHint(model.text(
+                    "Tap the folder name to edit it",
+                    "フォルダ名をタップして編集します",
+                    "點按資料夾名稱即可編輯"
+                ))
             }
         }
         .frame(maxWidth: .infinity)
@@ -1334,13 +1350,7 @@ struct FolderTitleEditor: View {
                 endEditing(commit: true)
             }
         }
-        .accessibilityLabel(model.text("Rename Folder", "フォルダ名を変更", "重新命名資料夾"))
-        .accessibilityHint(model.text(
-            "Tap the folder name to edit it",
-            "フォルダ名をタップして編集します",
-            "點按資料夾名稱即可編輯"
-        ))
-        .accessibilityAddTraits(.isButton)
+        .onDisappear { endEditing(commit: true) }
     }
 
     private var currentName: String {

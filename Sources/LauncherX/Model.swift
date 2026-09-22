@@ -370,6 +370,7 @@ final class FolderPagerState: ObservableObject {
     private var reorderFolderHoverID: UUID?
     private var reorderFolderHoverStartDate: Date?
     private var reorderFolderExitStartDate: Date?
+    private var reorderFolderExitArmedID: UUID?
     private var exitedDragFolderID: UUID?
     private var accessibilityOptionsObserver: NSObjectProtocol?
     private var launcherDisplayObservers: [NSObjectProtocol] = []
@@ -622,6 +623,9 @@ final class FolderPagerState: ObservableObject {
         clearKeyboardSelection()
         folderPager.page = 0
         folderPager.displayedPage = 0
+        folderPagerLayoutInfo = nil
+        reorderFolderExitStartDate = nil
+        reorderFolderExitArmedID = nil
         clearReorderPreview()
         withAnimation(Self.folderVisibilityAnimation) {
             openGroupID = group.id
@@ -683,6 +687,9 @@ final class FolderPagerState: ObservableObject {
         folderPager.page = 0
         folderPager.displayedPage = 0
         folderPager.pageCount = 1
+        folderPagerLayoutInfo = nil
+        reorderFolderExitStartDate = nil
+        reorderFolderExitArmedID = nil
         resetReorderFolderHover()
         clearReorderPreview()
         if search.isEmpty, let returnSelectionID,
@@ -1235,6 +1242,9 @@ final class FolderPagerState: ObservableObject {
             }
         }
         reorderFolderExitStartDate = nil
+        // A drag picked up inside an existing folder can immediately leave it.
+        // A root drag that opens a folder must enter its new panel first.
+        reorderFolderExitArmedID = sourceIsInOpenGroup(sourceID) ? openGroupID : nil
         exitedDragFolderID = nil
         resetReorderEdgeHover()
         guard reorderDragTimer == nil else { return }
@@ -1256,6 +1266,7 @@ final class FolderPagerState: ObservableObject {
         setReorderPreview(nil)
         if reorderDragSourceID != nil { reorderDragSourceID = nil }
         reorderFolderExitStartDate = nil
+        reorderFolderExitArmedID = nil
         exitedDragFolderID = nil
         resetReorderEdgeHover()
         resetReorderFolderHover()
@@ -1340,9 +1351,15 @@ final class FolderPagerState: ObservableObject {
     func updateReorderDrag(localX: Double, localYFromTop: Double, now: Date = Date()) {
         guard reorderDragSourceID != nil,
               localX.isFinite, localYFromTop.isFinite else { return }
-        if openGroupID != nil, let band = folderPagerLayoutInfo?.bandFrame {
+        if let groupID = openGroupID, let band = folderPagerLayoutInfo?.bandFrame {
             let point = CGPoint(x: localX, y: localYFromTop)
             if band.insetBy(dx: -12, dy: -12).contains(point) {
+                reorderFolderExitArmedID = groupID
+                reorderFolderExitStartDate = nil
+            } else if reorderFolderExitArmedID != groupID {
+                // Hover-opening moves the target away from the root icon.
+                // Let the pointer reach the panel at any speed; only an
+                // actual departure from the folder starts the exit dwell.
                 reorderFolderExitStartDate = nil
             } else if let began = reorderFolderExitStartDate {
                 if now.timeIntervalSince(began) >= 0.20 {
@@ -1367,7 +1384,7 @@ final class FolderPagerState: ObservableObject {
             resetReorderEdgeHover()
         }
         updateReorderPreview(localX: localX, localYFromTop: localYFromTop)
-        updateFolderHoverOpen(localX: localX, localYFromTop: localYFromTop)
+        updateFolderHoverOpen(localX: localX, localYFromTop: localYFromTop, now: now)
     }
 
     private func updateReorderPreview(localX: Double, localYFromTop: Double) {
@@ -1453,7 +1470,7 @@ final class FolderPagerState: ObservableObject {
         setReorderPreview(LauncherReorderPreview(sourceID: sourceID, page: page, slot: slot))
     }
 
-    private func updateFolderHoverOpen(localX: Double, localYFromTop: Double) {
+    private func updateFolderHoverOpen(localX: Double, localYFromTop: Double, now: Date) {
         guard openGroupID == nil,
               let sourceID = reorderDragSourceID,
               sourceID.hasPrefix("app:"),
@@ -1469,7 +1486,6 @@ final class FolderPagerState: ObservableObject {
             return
         }
         guard hoveredGroup.id != exitedDragFolderID else { return }
-        let now = Date()
         if reorderFolderHoverID != hoveredGroup.id {
             reorderFolderHoverID = hoveredGroup.id
             reorderFolderHoverStartDate = now

@@ -21,6 +21,7 @@ swiftc -parse-as-library \
   QualityTests/SearchTypingTests.swift \
   QualityTests/MemoryResourceTests.swift \
   QualityTests/ReorderContinuityTests.swift \
+  QualityTests/FolderDragEntryTests.swift \
   -o .build/quality-tests/LauncherQualityTests \
   -framework SwiftUI \
   -framework AppKit
