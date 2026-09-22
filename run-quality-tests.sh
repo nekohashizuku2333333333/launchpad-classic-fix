@@ -12,7 +12,15 @@ swiftc -parse-as-library \
   Sources/LauncherX/ScrollWheelMonitor.swift \
   Sources/LauncherX/LaunchpadLayout.swift \
   Sources/LauncherX/ContentView.swift \
+  Sources/LauncherX/LaunchpadSearchField.swift \
   QualityTests/LauncherQualityTests.swift \
+  QualityTests/KeyboardEditingTests.swift \
+  QualityTests/StoreUninstallTests.swift \
+  QualityTests/DragProviderTests.swift \
+  QualityTests/DisplaySafeAreaTests.swift \
+  QualityTests/SearchTypingTests.swift \
+  QualityTests/MemoryResourceTests.swift \
+  QualityTests/ReorderContinuityTests.swift \
   -o .build/quality-tests/LauncherQualityTests \
   -framework SwiftUI \
   -framework AppKit

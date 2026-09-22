@@ -11,9 +11,11 @@ enum LauncherMemoryPolicy {
     static let iconDataCacheCost = 12 * 1_024 * 1_024
     static let iconImageCacheCount = 48
     static let iconImageCacheCost = 16 * 1_024 * 1_024
-    static let backgroundMaximumPixelSize = 3_072
+    // The wallpaper is always blurred behind the launcher. Keep only the
+    // detail that can survive that blur, rather than a Retina-sized texture.
+    static let backgroundMaximumPixelSize = 1_536
     static let backgroundCacheCount = 1
-    static let backgroundCacheCost = 48 * 1_024 * 1_024
+    static let backgroundCacheCost = backgroundMaximumPixelSize * backgroundMaximumPixelSize * 4
 
     static let maximumPersistentCacheCost = iconDataCacheCost
         + iconImageCacheCost
@@ -28,6 +30,96 @@ struct AppScanResult: Sendable {
 enum FileOperationOutcome: Sendable {
     case success
     case failure(String)
+}
+
+/// The same policy controls both the delete badge and the final file operation.
+/// Store metadata identifies installed apps; it is not purchase validation.
+enum LauncherStoreAppPolicy {
+    static func canUninstall(_ url: URL, homeDirectory: URL) -> Bool {
+        let appURL = url.standardizedFileURL
+        guard isSafeFileURL(appURL), appURL.pathExtension.lowercased() == "app",
+              let values = try? appURL.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
+              values.isDirectory == true, values.isSymbolicLink != true else { return false }
+
+        let resolvedURL = appURL.resolvingSymlinksInPath()
+        guard !resolvedURL.path.hasPrefix("/System/"),
+              resolvedURL.path != Bundle.main.bundleURL.resolvingSymlinksInPath().path else { return false }
+        if let identifier = Bundle(url: appURL)?.bundleIdentifier,
+           identifier == Bundle.main.bundleIdentifier { return false }
+
+        let roots = [
+            URL(fileURLWithPath: "/Applications", isDirectory: true),
+            homeDirectory.appendingPathComponent("Applications", isDirectory: true)
+        ]
+        let isInstalledLocation = roots.contains { root in
+            let rootURL = root.standardizedFileURL
+            let prefix = rootURL.path + "/"
+            guard isSafeFileURL(rootURL), appURL.path.hasPrefix(prefix) else { return false }
+            let relativePath = String(appURL.path.dropFirst(prefix.count))
+            // A folder symlink below Applications must not redirect deletion
+            // into another location. Resolving the root accommodates /var.
+            let expected = rootURL.resolvingSymlinksInPath().appendingPathComponent(relativePath)
+            return expected.path == resolvedURL.path
+                && !relativePath.split(separator: "/").dropLast().contains {
+                    $0.lowercased().hasSuffix(".app")
+                }
+        }
+        guard isInstalledLocation else { return false }
+
+        if isRegularContainedFile(appURL.appendingPathComponent("Contents/_MASReceipt/receipt"), in: appURL)
+            || isRegularContainedFile(appURL.appendingPathComponent("_MASReceipt/receipt"), in: appURL) {
+            return true
+        }
+        return hasWrappedStoreApplication(at: appURL)
+    }
+
+    private static func hasWrappedStoreApplication(at appURL: URL) -> Bool {
+        let wrapper = appURL.appendingPathComponent("Wrapper", isDirectory: true)
+        let wrappedLink = appURL.appendingPathComponent("WrappedBundle")
+        guard let linkValues = try? wrappedLink.resourceValues(forKeys: [.isSymbolicLinkKey]),
+              linkValues.isSymbolicLink == true else { return false }
+        let inner = wrappedLink.resolvingSymlinksInPath()
+        let resolvedWrapper = wrapper.resolvingSymlinksInPath()
+        guard resolvedWrapper.path == appURL.resolvingSymlinksInPath().appendingPathComponent("Wrapper").path,
+              inner.deletingLastPathComponent().path == resolvedWrapper.path,
+              inner.pathExtension.lowercased() == "app",
+              let bundle = Bundle(url: inner),
+              let identifier = bundle.bundleIdentifier,
+              let platforms = bundle.object(forInfoDictionaryKey: "CFBundleSupportedPlatforms") as? [String],
+              platforms.contains("iPhoneOS") else { return false }
+
+        if isRegularContainedFile(inner.appendingPathComponent("_MASReceipt/receipt"), in: appURL) {
+            return true
+        }
+        // iPhone/iPad apps installed on Apple silicon can have store metadata
+        // in the outer wrapper instead of a Mac-style receipt in Contents.
+        let metadataURL = wrapper.appendingPathComponent("iTunesMetadata.plist")
+        guard isRegularContainedFile(metadataURL, in: appURL, maximumSize: 1_048_576),
+              let data = try? Data(contentsOf: metadataURL),
+              let metadata = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              let itemID = metadata["itemId"] as? NSNumber,
+              itemID.int64Value > 0,
+              metadata["softwareVersionBundleId"] as? String == identifier else { return false }
+        return true
+    }
+
+    private static func isRegularContainedFile(_ url: URL, in appURL: URL, maximumSize: Int? = nil) -> Bool {
+        guard isSafeFileURL(url),
+              let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]),
+              values.isRegularFile == true, values.isSymbolicLink != true,
+              let size = values.fileSize, size > 0,
+              maximumSize.map({ size <= $0 }) ?? true else { return false }
+        let appPath = appURL.standardizedFileURL.path + "/"
+        guard url.standardizedFileURL.path.hasPrefix(appPath) else { return false }
+        let relativePath = String(url.standardizedFileURL.path.dropFirst(appPath.count))
+        return url.resolvingSymlinksInPath().path
+            == appURL.resolvingSymlinksInPath().appendingPathComponent(relativePath).path
+    }
+
+    private static func isSafeFileURL(_ url: URL) -> Bool {
+        url.isFileURL && url.path.count <= 4_096
+            && !url.path.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
+    }
 }
 
 actor LauncherFileScanner {
@@ -47,7 +139,8 @@ actor LauncherFileScanner {
     ) -> AppScanResult {
         Self.scanApplications(
             in: Self.applicationRoots(homeDirectory: homeDirectory),
-            preferredLocalizations: preferredLocalizations
+            preferredLocalizations: preferredLocalizations,
+            homeDirectory: homeDirectory
         )
     }
 
@@ -61,7 +154,8 @@ actor LauncherFileScanner {
 
     nonisolated static func scanApplications(
         in roots: [URL],
-        preferredLocalizations: [String] = ["en"]
+        preferredLocalizations: [String] = ["en"],
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
     ) -> AppScanResult {
         let fileManager = FileManager()
         let resourceKeys: Set<URLResourceKey> = [.isDirectoryKey, .isPackageKey, .isSymbolicLinkKey]
@@ -104,6 +198,7 @@ actor LauncherFileScanner {
                             at: child,
                             fileManager: fileManager,
                             preferredLocalizations: preferredLocalizations,
+                            homeDirectory: homeDirectory,
                             to: &found
                         )
                         continue
@@ -130,6 +225,7 @@ actor LauncherFileScanner {
         at url: URL,
         fileManager: FileManager,
         preferredLocalizations: [String],
+        homeDirectory: URL,
         to found: inout [String: AppItem]
     ) {
         let standardizedURL = url.standardizedFileURL
@@ -144,11 +240,12 @@ actor LauncherFileScanner {
 
         let deduplicationPath = resolvedURL.path
         let bundle = Bundle(url: standardizedURL)
-        guard found[deduplicationPath] == nil, !isLauncherSelf(url: standardizedURL, bundle: bundle) else { return }
+        guard !isLauncherSelf(url: standardizedURL, bundle: bundle) else { return }
         let category = bundle?.object(forInfoDictionaryKey: "LSApplicationCategoryType") as? String
-        let receipt = standardizedURL.appendingPathComponent("Contents/_MASReceipt/receipt").path
-        let isSystemApp = resolvedURL.path.hasPrefix("/System/")
-        let deletable = !isSystemApp && fileManager.fileExists(atPath: receipt)
+        let deletable = LauncherStoreAppPolicy.canUninstall(standardizedURL, homeDirectory: homeDirectory)
+        // Prefer the installed store bundle if an alias to it was scanned first,
+        // so the alias cannot suppress the real application's delete badge.
+        if let existing = found[deduplicationPath], existing.isDeletable || !deletable { return }
         found[deduplicationPath] = AppItem(
             url: standardizedURL,
             bundleIdentifier: bundle?.bundleIdentifier,
@@ -407,28 +504,45 @@ final class LauncherApplicationMonitor {
 }
 
 actor LauncherFileOperator {
-    func moveApplicationToTrash(_ url: URL, homeDirectory: URL) -> FileOperationOutcome {
-        let fileManager = FileManager()
-        let appURL = url.standardizedFileURL
-        let appPath = appURL.path
-        let userApplicationsPath = homeDirectory
-            .appendingPathComponent("Applications", isDirectory: true)
-            .standardizedFileURL.path + "/"
-        let isInApplications = appPath.hasPrefix("/Applications/") || appPath.hasPrefix(userApplicationsPath)
-        let receiptPath = appURL.appendingPathComponent("Contents/_MASReceipt/receipt").path
+    private let trashAction: @Sendable (URL) throws -> Void
+    private let runningApplicationCheck: @Sendable (URL) async -> Bool
 
-        guard appURL.isFileURL,
-              appURL.pathExtension.lowercased() == "app",
-              appPath.count <= 4_096,
-              !appPath.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
-              isInApplications,
-              fileManager.fileExists(atPath: appPath),
-              fileManager.fileExists(atPath: receiptPath) else {
+    init(
+        trashAction: @escaping @Sendable (URL) throws -> Void = { url in
+            try FileManager().trashItem(at: url, resultingItemURL: nil)
+        },
+        runningApplicationCheck: @escaping @Sendable (URL) async -> Bool = { url in
+            await MainActor.run {
+                let appPath = url.resolvingSymlinksInPath().path
+                return NSWorkspace.shared.runningApplications.contains { running in
+                    guard !running.isTerminated, let bundleURL = running.bundleURL else { return false }
+                    let runningPath = bundleURL.resolvingSymlinksInPath().path
+                    return runningPath == appPath || runningPath.hasPrefix(appPath + "/")
+                }
+            }
+        }
+    ) {
+        self.trashAction = trashAction
+        self.runningApplicationCheck = runningApplicationCheck
+    }
+
+    func moveApplicationToTrash(_ url: URL, homeDirectory: URL) async -> FileOperationOutcome {
+        let appURL = url.standardizedFileURL
+        guard LauncherStoreAppPolicy.canUninstall(appURL, homeDirectory: homeDirectory) else {
             return .failure("The application is no longer in a deletable location.")
+        }
+        guard !(await runningApplicationCheck(appURL)) else {
+            return .failure("Quit the application before deleting it.")
+        }
+        guard !Task.isCancelled else { return .failure("The operation was cancelled.") }
+        // Revalidate after the asynchronous running-app check: the app may
+        // have been moved, updated, or replaced while awaiting the main actor.
+        guard LauncherStoreAppPolicy.canUninstall(appURL, homeDirectory: homeDirectory) else {
+            return .failure("The application changed before it could be deleted. Please try again.")
         }
 
         do {
-            try fileManager.trashItem(at: appURL, resultingItemURL: nil)
+            try trashAction(appURL)
             return .success
         } catch {
             return .failure(error.localizedDescription)
@@ -452,20 +566,26 @@ actor LauncherIconLoader {
     private var didPerformInitialSweep = false
 
     func iconData(for url: URL) -> Data? {
+        guard !Task.isCancelled else { return nil }
         let standardizedURL = url.standardizedFileURL
         let key = standardizedURL.path as NSString
         if let cached = cache.object(forKey: key) { return cached as Data }
         if let diskData = Self.readDiskIcon(for: standardizedURL) {
+            guard !Task.isCancelled else { return nil }
             cache.setObject(diskData as NSData, forKey: key, cost: diskData.count)
             return diskData
         }
-        let iconData: Data?
-        if let bundleIcon = Self.bundleIcon(for: standardizedURL),
-           let normalizedBundleIconData = Self.normalizedIconData(bundleIcon) {
-            iconData = normalizedBundleIconData
-        } else {
+        // A scan can normalize many large .icns representations back to back
+        // on this actor. Release their temporary AppKit/ImageIO objects after
+        // each icon; only the small encoded result needs to survive.
+        let iconData: Data? = autoreleasepool {
+            if let bundleIcon = Self.bundleIcon(for: standardizedURL),
+               let normalizedBundleIconData = Self.normalizedIconData(bundleIcon) {
+                return normalizedBundleIconData
+            }
+            guard !Task.isCancelled else { return nil }
             let workspaceIcon = NSWorkspace.shared.icon(forFile: standardizedURL.path)
-            iconData = Self.normalizedIconData(workspaceIcon)
+            return Self.normalizedIconData(workspaceIcon)
         }
         guard !Task.isCancelled, let iconData else { return nil }
         cache.setObject(iconData as NSData, forKey: key, cost: iconData.count)
@@ -726,6 +846,7 @@ actor LauncherBackgroundImageLoader {
     private var cacheCost = 0
 
     func imageData(for url: URL) -> LauncherDecodedImage? {
+        guard !Task.isCancelled else { return nil }
         let standardizedURL = url.standardizedFileURL
         let key = standardizedURL.path
         if let cached = cachedImage(forKey: key) { return cached }
@@ -733,21 +854,26 @@ actor LauncherBackgroundImageLoader {
               standardizedURL.isFileURL,
               FileManager.default.isReadableFile(atPath: standardizedURL.path) else { return nil }
 
-        let options: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: LauncherMemoryPolicy.backgroundMaximumPixelSize,
-            kCGImageSourceShouldCacheImmediately: false
-        ]
-        guard let source = CGImageSourceCreateWithURL(standardizedURL as CFURL, nil),
-              let cgImage = CGImageSourceCreateThumbnailAtIndex(
-                source,
-                0,
-                options as CFDictionary
-              ),
-              !Task.isCancelled,
-              let decodedImage = Self.rgbaImage(from: cgImage),
-              !Task.isCancelled else { return nil }
+        // The retained result contains only its bounded RGBA Data. Drain any
+        // autoreleased decoder/thumbnail temporaries before another opening
+        // prepares its wallpaper on the same actor executor.
+        let decodedImage: LauncherDecodedImage? = autoreleasepool {
+            let options: [CFString: Any] = [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceThumbnailMaxPixelSize: LauncherMemoryPolicy.backgroundMaximumPixelSize,
+                kCGImageSourceShouldCacheImmediately: false
+            ]
+            guard let source = CGImageSourceCreateWithURL(standardizedURL as CFURL, nil),
+                  let cgImage = CGImageSourceCreateThumbnailAtIndex(
+                    source,
+                    0,
+                    options as CFDictionary
+                  ),
+                  !Task.isCancelled else { return nil }
+            return Self.rgbaImage(from: cgImage)
+        }
+        guard !Task.isCancelled, let decodedImage else { return nil }
         store(decodedImage, forKey: key)
         return decodedImage
     }

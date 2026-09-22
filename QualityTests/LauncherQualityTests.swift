@@ -2,6 +2,7 @@ import Foundation
 import Darwin
 import AppKit
 import CoreGraphics
+import Combine
 
 private struct QualityTestFailure: Error, CustomStringConvertible {
     let description: String
@@ -17,6 +18,7 @@ struct LauncherQualityTests {
             try traditionalChineseLocalizationIsComplete()
             try systemLanguageResolutionHandlesTraditionalChineseRegions()
             try searchFiltersApplicationsAndResetsPaging()
+            try searchResultsCannotMutateSavedLayout()
             try duplicateSavedGroupsAndPathsAreSanitized()
             try duplicateRuntimeOrderDoesNotCrashOrLoseEntries()
             try dropInputValidationRejectsUnknownIdentifiers()
@@ -24,10 +26,21 @@ struct LauncherQualityTests {
             try folderReorderingMatchesVisibleDropSlots()
             try folderDragPreviewHandlesUncachedIcons()
             try openFolderDropsAcceptExternalAppsAcrossInterior()
+            try externalFolderDropsHonorPageAndInsertionSlot()
             try openFolderAllowsMovingAppsOutToRootSlots()
+            try folderDragOutCanBeCancelledWithoutSavingMutations()
+            try folderDragOutCanInsertBeforeOrAfterRootEntries()
+            try folderDragOutDissolvesSourceAtOriginalPosition()
+            try folderDragOutCanMoveAcrossRootPages()
+            try folderDragOutCanEnterAnotherFolder()
+            try folderDragOutCanCreateNewFolder()
+            try stationaryDragPublishesOnlyChangedPreviews()
+            try hidingLauncherCancelsDragWithoutChangingLayout()
             try await folderRenameControlsPersistExplicitly()
             try folderRemovalMatchesNativeLifecycle()
             try pageNavigationHandlesIntegerBoundaries()
+            try await pageNavigationDoesNotRestoreStaleDestinations()
+            try await folderNavigationDoesNotRestoreStaleDestinations()
             try modalUIBlocksBackgroundPageNavigation()
             try launcherWindowAcceptsKeyboardFocus()
             try quitShortcutRequiresCommandQ()
@@ -46,10 +59,18 @@ struct LauncherQualityTests {
             try await applicationMonitorDetectsDirectoryChanges()
             try memoryPolicyKeepsCachesBounded()
             try await imageLoadersHandleMissingFiles()
-            try await hiddenLauncherRetainsPreparedIconsForReopening()
+            try await hiddenLauncherReleasesAndPreparesImagesForReopening()
             try applicationUpdatePreservesUserLayout()
             try await fileOperatorRejectsUnsafeDeleteLocation()
-            print("Launcher quality tests passed (37/37)")
+            try KeyboardEditingTests.run()
+            let storeTestCount = try await StoreUninstallTests.run()
+            let dragTestCount = try await DragProviderTests.run()
+            let displayTestCount = try DisplaySafeAreaTests.run()
+            let searchTypingTestCount = try SearchTypingTests.run()
+            let memoryResourceTestCount = try await MemoryResourceTests.run()
+            let reorderContinuityTestCount = try ReorderContinuityTests.run()
+            let testCount = 49 + KeyboardEditingTests.count + storeTestCount + dragTestCount + displayTestCount + searchTypingTestCount + memoryResourceTestCount + reorderContinuityTestCount
+            print("Launcher quality tests passed (\(testCount)/\(testCount))")
         } catch {
             FileHandle.standardError.write(Data("Launcher quality tests failed: \(error)\n".utf8))
             Darwin.exit(EXIT_FAILURE)
@@ -71,7 +92,7 @@ struct LauncherQualityTests {
 
         let model = LauncherModel(defaults: context.defaults, autoScan: false)
         try require(model.language == "en", "Invalid language did not fall back to English")
-        try require(model.iconSize == 92, "Non-finite icon size was not sanitized")
+        try require(model.iconSize == 90, "Non-finite icon size did not fall back to the Sequoia reference default")
         try require(model.background == "wallpaper", "Invalid background was not sanitized")
         try require(model.rootOrder == ["app:/Applications/Alpha.app"], "Invalid root order was not sanitized")
     }
@@ -190,6 +211,54 @@ struct LauncherQualityTests {
 
         model.search = "missing"
         try require(model.rootEntries.isEmpty, "A missing search query returned unexpected applications")
+    }
+
+    private static func searchResultsCannotMutateSavedLayout() throws {
+        let context = try makeDefaults()
+        defer { context.defaults.removePersistentDomain(forName: context.domain) }
+        let model = LauncherModel(defaults: context.defaults, autoScan: false)
+        let groupedMatch = AppItem(url: URL(fileURLWithPath: "/Applications/Find In Folder.app"))
+        let groupedOther = AppItem(url: URL(fileURLWithPath: "/Applications/Other In Folder.app"))
+        let looseMatch = AppItem(url: URL(fileURLWithPath: "/Applications/Find Loose.app"))
+        let looseOther = AppItem(url: URL(fileURLWithPath: "/Applications/Other Loose.app"))
+        let apps = [groupedMatch, groupedOther, looseMatch, looseOther]
+        let group = AppGroup(name: "Folder", appPaths: [groupedMatch.url.path, groupedOther.url.path])
+        let order = [looseOther.id, LauncherEntry.group(group).id, looseMatch.id]
+        model.apps = apps
+        model.groups = [group]
+        model.rootOrder = order
+        let savedGroups = context.defaults.data(forKey: "launcher.groups.v2")
+        let savedOrder = context.defaults.stringArray(forKey: "launcher.order.v1")
+        model.search = "Find"
+        try require(
+            model.rootEntries.map(\.id) == [groupedMatch.id, looseMatch.id],
+            "The search regression fixture did not include a grouped app and omit other root entries"
+        )
+        // A result may begin a drag, which exits search before accepting drops.
+        // Direct drops while the filtered page is still active must not treat
+        // result indices as positions in the saved root arrangement.
+        try require(
+            !model.reorder(groupedMatch.id, beside: looseMatch.id, after: false),
+            "Reordering search results unexpectedly removed an app from its folder"
+        )
+        try require(
+            !model.reorderToSlot(looseMatch.id, page: 0, slot: 0, pageSize: 9),
+            "A search result could be inserted into the filtered root order"
+        )
+        try require(
+            !model.reorderToPageEnd(looseMatch.id, page: 0, pageSize: 9),
+            "A search result could overwrite the root order through a page-end drop"
+        )
+        model.handleDrop(groupedMatch.id, on: .app(looseMatch))
+        model.handleDrop(looseMatch.id, on: .group(group))
+        try require(model.groups == [group] && model.rootOrder == order, "Dropping search results changed folder membership or root order")
+        try require(
+            context.defaults.data(forKey: "launcher.groups.v2") == savedGroups
+                && context.defaults.stringArray(forKey: "launcher.order.v1") == savedOrder,
+            "Dropping search results overwrote the persisted layout"
+        )
+        model.search = ""
+        try require(model.rootEntries.map(\.id) == order, "Leaving search did not restore the complete original root layout")
     }
 
     private static func duplicateSavedGroupsAndPathsAreSanitized() throws {
@@ -396,6 +465,54 @@ struct LauncherQualityTests {
         )
     }
 
+    private static func externalFolderDropsHonorPageAndInsertionSlot() throws {
+        let cases: [(page: Int, slot: Int?, insertion: Int)] = [
+            (page: 0, slot: 0, insertion: 0),
+            (page: 1, slot: 1, insertion: 4),
+            (page: 0, slot: nil, insertion: 3)
+        ]
+        for drop in cases {
+            let context = try makeDefaults()
+            defer { context.defaults.removePersistentDomain(forName: context.domain) }
+            let model = LauncherModel(defaults: context.defaults, autoScan: false)
+            let apps = (0..<8).map { AppItem(url: URL(fileURLWithPath: "/Applications/ExternalDropApp\($0).app")) }
+            let group = AppGroup(name: "Folder", appPaths: apps.prefix(7).map(\.url.path))
+            let external = apps[7]
+            model.apps = apps
+            model.groups = [group]
+            model.open(group)
+            model.setFolderPageCount(3)
+            model.setFolderPage(drop.page)
+            model.updateFolderPagerLayout(
+                origin: CGPoint(x: 200, y: 260), cellWidth: 140, columnCount: 3,
+                capacity: 3, columnSpacing: 24, rowSpacing: 20, itemHeight: 120
+            )
+            model.startReorderDrag(external.id)
+            if let slot = drop.slot {
+                model.updateReorderDrag(localX: 201 + Double(slot) * 164, localYFromTop: 280)
+                try require(
+                    model.reorderPreview == LauncherReorderPreview(sourceID: external.id, page: drop.page, slot: slot),
+                    "An external app did not preview its requested folder insertion slot"
+                )
+            }
+            // The mouse-up timer may clear transient state before SwiftUI
+            // delivers the drop with its own page and release coordinates.
+            model.clearReorderDragState()
+            try require(
+                model.dropInOpenGroup(external.id, page: drop.page, capacity: 3, slot: drop.slot),
+                "An external app drop was rejected after its transient preview cleared"
+            )
+            var expected = group.appPaths
+            expected.insert(external.url.path, at: drop.insertion)
+            try require(
+                model.group(for: group.id)?.appPaths == expected,
+                "An external app ignored its folder page/slot and appended at the global end"
+            )
+            let restored = LauncherModel(defaults: context.defaults, autoScan: false)
+            try require(restored.group(for: group.id)?.appPaths == expected, "The external folder insertion order was not persisted")
+        }
+    }
+
     private static func openFolderAllowsMovingAppsOutToRootSlots() throws {
         let context = try makeDefaults()
         defer { context.defaults.removePersistentDomain(forName: context.domain) }
@@ -442,7 +559,282 @@ struct LauncherQualityTests {
             ],
             "A folder app dragged out did not insert at the requested root position"
         )
-        try require(model.openGroupID == persistentGroup.id, "A folder with multiple remaining apps closed unexpectedly")
+        try require(model.openGroupID == nil, "A successful root drop left its source folder open")
+        try require(
+            model.group(for: persistentGroup.id)?.appPaths == [first.url.path, fourth.url.path],
+            "Closing the source folder after a root drop changed its remaining membership or order"
+        )
+    }
+
+    private static func folderDragOutCanBeCancelledWithoutSavingMutations() throws {
+        let context = try makeDefaults()
+        defer { context.defaults.removePersistentDomain(forName: context.domain) }
+        let model = LauncherModel(defaults: context.defaults, autoScan: false)
+        let apps = (0..<3).map { AppItem(url: URL(fileURLWithPath: "/Applications/CancelApp\($0).app")) }
+        let group = AppGroup(name: "Folder", appPaths: apps.prefix(2).map(\.url.path))
+        let initialOrder = [apps[2].id, LauncherEntry.group(group).id]
+        model.apps = apps
+        model.groups = [group]
+        model.rootOrder = initialOrder
+        model.open(group)
+        model.updateFolderPagerLayout(
+            origin: CGPoint(x: 200, y: 260), cellWidth: 140, columnCount: 2,
+            capacity: 6, columnSpacing: 24, rowSpacing: 20, itemHeight: 120,
+            bandFrame: CGRect(x: 160, y: 220, width: 400, height: 440)
+        )
+        let savedGroups = context.defaults.data(forKey: "launcher.groups.v2")
+        let savedOrder = context.defaults.stringArray(forKey: "launcher.order.v1")
+        let now = Date()
+        model.startReorderDrag(apps[0].id)
+        model.updateReorderDrag(localX: 600, localYFromTop: 170, now: now)
+        try require(model.openGroupID == group.id, "The folder closed immediately on crossing its edge")
+        model.updateReorderDrag(localX: 200, localYFromTop: 260, now: now.addingTimeInterval(0.1))
+        model.updateReorderDrag(localX: 600, localYFromTop: 170, now: now.addingTimeInterval(0.15))
+        try require(model.openGroupID == group.id, "Re-entering the folder did not reset the exit dwell")
+        model.updateReorderDrag(localX: 600, localYFromTop: 170, now: now.addingTimeInterval(0.4))
+
+        try require(model.openGroupID == nil, "Hovering outside the folder did not reveal the root grid")
+        try require(model.reorderDragSourceID == apps[0].id, "Closing the folder ended the live drag")
+        try require(model.groups == [group] && model.rootOrder == initialOrder, "Hovering out mutated the layout before a drop")
+        try require(
+            context.defaults.data(forKey: "launcher.groups.v2") == savedGroups
+                && context.defaults.stringArray(forKey: "launcher.order.v1") == savedOrder,
+            "Hovering out saved an uncommitted layout"
+        )
+
+        model.clearReorderDragState()
+        try require(model.reorderDragSourceID == nil && model.reorderPreview == nil, "Cancelling left a drag placeholder behind")
+        let restored = LauncherModel(defaults: context.defaults, autoScan: false)
+        restored.apps = apps
+        try require(
+            restored.groups == [group] && restored.rootEntries.map(\.id) == initialOrder,
+            "Cancelling a drag out of a two-app folder changed its persisted membership or order"
+        )
+    }
+
+    private static func folderDragOutCanInsertBeforeOrAfterRootEntries() throws {
+        for after in [false, true] {
+            let context = try makeDefaults()
+            defer { context.defaults.removePersistentDomain(forName: context.domain) }
+            let model = LauncherModel(defaults: context.defaults, autoScan: false)
+            let apps = (0..<6).map { AppItem(url: URL(fileURLWithPath: "/Applications/InsertApp\($0).app")) }
+            let group = AppGroup(name: "Folder", appPaths: apps.prefix(3).map(\.url.path))
+            let groupID = LauncherEntry.group(group).id
+            model.apps = apps
+            model.groups = [group]
+            model.rootOrder = [apps[3].id, groupID, apps[4].id, apps[5].id]
+            model.open(group)
+            model.startReorderDrag(apps[0].id)
+            try require(model.continueReorderDragOutsideFolder(), "A folder drag could not continue on the root grid")
+            try require(
+                model.reorder(apps[0].id, beside: apps[4].id, after: after),
+                "A dragged folder app was rejected by a root tile insertion target"
+            )
+            let expected = after
+                ? [apps[3].id, groupID, apps[4].id, apps[0].id, apps[5].id]
+                : [apps[3].id, groupID, apps[0].id, apps[4].id, apps[5].id]
+            try require(model.rootEntries.map(\.id) == expected, "A folder app did not land on the requested side of the root target")
+            try require(model.groups.first?.appPaths == [apps[1].url.path, apps[2].url.path], "Moving an app out changed the remaining folder order")
+            try require(model.reorderDragSourceID == nil, "A committed root insertion left its drag session active")
+            let restored = LauncherModel(defaults: context.defaults, autoScan: false)
+            restored.apps = apps
+            try require(restored.rootEntries.map(\.id) == expected, "The committed root insertion was not persisted")
+        }
+    }
+
+    private static func folderDragOutDissolvesSourceAtOriginalPosition() throws {
+        let context = try makeDefaults()
+        defer { context.defaults.removePersistentDomain(forName: context.domain) }
+        let model = LauncherModel(defaults: context.defaults, autoScan: false)
+        let apps = (0..<5).map { AppItem(url: URL(fileURLWithPath: "/Applications/DissolveApp\($0).app")) }
+        let group = AppGroup(name: "Folder", appPaths: apps.prefix(2).map(\.url.path))
+        model.apps = apps
+        model.groups = [group]
+        model.rootOrder = [apps[2].id, LauncherEntry.group(group).id, apps[3].id, apps[4].id]
+        model.open(group)
+        model.startReorderDrag(apps[0].id)
+        try require(model.continueReorderDragOutsideFolder(), "The two-app folder did not close for a continued drag")
+        try require(model.groups == [group], "The two-app folder dissolved before the drop")
+        try require(model.reorder(apps[0].id, beside: apps[3].id, after: true), "The two-app folder drop was rejected")
+        try require(model.groups.isEmpty, "The source folder was not dissolved after its second app was removed")
+        try require(
+            model.rootEntries.map(\.id) == [apps[2].id, apps[1].id, apps[3].id, apps[0].id, apps[4].id],
+            "Dissolving the source folder moved its remaining app away from the original folder position"
+        )
+    }
+
+    private static func folderDragOutCanMoveAcrossRootPages() throws {
+        for dropAtPageEnd in [false, true] {
+            let context = try makeDefaults()
+            defer { context.defaults.removePersistentDomain(forName: context.domain) }
+            let model = LauncherModel(defaults: context.defaults, autoScan: false)
+            let apps = (0..<10).map { AppItem(url: URL(fileURLWithPath: "/Applications/PageDropApp\($0).app")) }
+            let group = AppGroup(name: "Folder", appPaths: apps.prefix(3).map(\.url.path))
+            let originalOrder = [LauncherEntry.group(group).id] + apps.dropFirst(3).map(\.id)
+            model.apps = apps
+            model.groups = [group]
+            model.rootOrder = originalOrder
+            model.setPageCount(3)
+            model.open(group)
+            model.startReorderDrag(apps[0].id)
+            try require(model.continueReorderDragOutsideFolder(), "The folder drag did not continue across pages")
+            model.goToPage(1)
+            let accepted = dropAtPageEnd
+                ? model.reorderToPageEnd(apps[0].id, page: 1, pageSize: 3)
+                : model.reorderToSlot(apps[0].id, page: 1, slot: 1, pageSize: 3)
+            try require(accepted, "A folder app could not be dropped on a different root page")
+            var expected = originalOrder
+            expected.insert(apps[0].id, at: dropAtPageEnd ? 6 : 4)
+            try require(model.rootEntries.map(\.id) == expected, "A cross-page drop appended to the global end instead of the requested page slot")
+            try require(model.currentPage == 1 && model.displayedPage == 1, "A cross-page drop returned to the source page")
+        }
+    }
+
+    private static func folderDragOutCanEnterAnotherFolder() throws {
+        for dropIntoOpenFolder in [false, true] {
+            let context = try makeDefaults()
+            defer { context.defaults.removePersistentDomain(forName: context.domain) }
+            let model = LauncherModel(defaults: context.defaults, autoScan: false)
+            let apps = (0..<6).map { AppItem(url: URL(fileURLWithPath: "/Applications/TransferApp\($0).app")) }
+            let source = AppGroup(name: "Source", appPaths: apps.prefix(2).map(\.url.path))
+            let target = AppGroup(name: "Target", appPaths: [apps[2].url.path, apps[3].url.path])
+            model.apps = apps
+            model.groups = [source, target]
+            model.rootOrder = [apps[4].id, LauncherEntry.group(source).id, LauncherEntry.group(target).id, apps[5].id]
+            model.open(source)
+            model.startReorderDrag(apps[0].id)
+            try require(model.continueReorderDragOutsideFolder(), "A folder drag could not reach another folder")
+            if dropIntoOpenFolder {
+                model.open(target)
+                try require(
+                    model.dropInOpenGroup(apps[0].id, beside: apps[3].id, after: false),
+                    "The open target folder rejected a dragged app from another folder"
+                )
+            } else {
+                model.handleDrop(apps[0].id, on: .group(target))
+            }
+            let expectedPaths = dropIntoOpenFolder
+                ? [apps[2].url.path, apps[0].url.path, apps[3].url.path]
+                : [apps[2].url.path, apps[3].url.path, apps[0].url.path]
+            try require(model.group(for: target.id)?.appPaths == expectedPaths, "The target folder did not retain the requested insertion order")
+            try require(model.group(for: source.id) == nil, "Transferring an app left a one-app source folder behind")
+            try require(
+                model.rootEntries.map(\.id) == [apps[4].id, apps[1].id, LauncherEntry.group(target).id, apps[5].id],
+                "Transferring an app moved the source folder's remaining app away from its original slot"
+            )
+        }
+    }
+
+    private static func folderDragOutCanCreateNewFolder() throws {
+        let context = try makeDefaults()
+        defer { context.defaults.removePersistentDomain(forName: context.domain) }
+        let model = LauncherModel(defaults: context.defaults, autoScan: false)
+        let apps = (0..<5).map { AppItem(url: URL(fileURLWithPath: "/Applications/MergeApp\($0).app")) }
+        let source = AppGroup(name: "Source", appPaths: apps.prefix(2).map(\.url.path))
+        model.apps = apps
+        model.groups = [source]
+        model.rootOrder = [apps[3].id, LauncherEntry.group(source).id, apps[2].id, apps[4].id]
+        model.open(source)
+        model.startReorderDrag(apps[0].id)
+        try require(model.continueReorderDragOutsideFolder(), "A dragged folder app could not reach a root app")
+        model.handleDrop(apps[0].id, on: .app(apps[2]))
+        guard let created = model.groups.first(where: { $0.id != source.id }) else {
+            throw QualityTestFailure(description: "Dropping a dragged folder app on a root app did not create a folder")
+        }
+        try require(model.group(for: source.id) == nil, "Creating a folder left a one-app source folder behind")
+        try require(created.appPaths == [apps[2].url.path, apps[0].url.path], "The new folder did not preserve target-first order")
+        try require(
+            model.rootEntries.map(\.id) == [apps[3].id, apps[1].id, LauncherEntry.group(created).id, apps[4].id],
+            "Creating a folder moved the source remainder or the target away from its original position"
+        )
+    }
+
+    private static func stationaryDragPublishesOnlyChangedPreviews() throws {
+        let context = try makeDefaults()
+        defer { context.defaults.removePersistentDomain(forName: context.domain) }
+        let model = LauncherModel(defaults: context.defaults, autoScan: false)
+        let apps = (0..<5).map { AppItem(url: URL(fileURLWithPath: "/Applications/PreviewApp\($0).app")) }
+        let group = AppGroup(name: "Folder", appPaths: apps.prefix(3).map(\.url.path))
+        model.apps = apps
+        model.groups = [group]
+        model.rootOrder = [apps[3].id, LauncherEntry.group(group).id, apps[4].id]
+        let size = CGSize(width: 1_000, height: 640)
+        let metrics = LaunchpadLayoutMetrics.calculate(containerWidth: size.width, containerHeight: size.height, preferredIconSize: 92)
+        let topOffset = 100.0
+        model.updateRootPagerLayout(topOffset: topOffset, size: size, metrics: metrics, pageSize: metrics.capacity)
+        model.open(group)
+        model.startReorderDrag(apps[0].id)
+        try require(model.continueReorderDragOutsideFolder(), "The folder drag did not reach the root preview")
+        var publications: [LauncherReorderPreview?] = []
+        let subscription = model.$reorderPreview.dropFirst().sink { publications.append($0) }
+        defer { subscription.cancel(); model.clearReorderDragState() }
+        let firstSlotX = (size.width - metrics.gridWidth) / 2 + 1
+        let y = topOffset + metrics.topInset + metrics.iconSize / 2
+
+        for _ in 0..<30 { model.updateReorderDrag(localX: firstSlotX, localYFromTop: y) }
+        try require(
+            model.reorderPreview == LauncherReorderPreview(sourceID: apps[0].id, page: 0, slot: 0),
+            "An app still belonging to its source folder did not receive a root insertion preview"
+        )
+        try require(publications.count == 1, "A stationary root drag repeatedly published the same preview")
+        for _ in 0..<30 { model.updateReorderDrag(localX: firstSlotX + metrics.columnStride, localYFromTop: y) }
+        try require(publications.count == 2 && model.reorderPreview?.slot == 1, "Changing root slots did not publish exactly one new preview")
+        for _ in 0..<30 { model.updateReorderDrag(localX: firstSlotX, localYFromTop: 20) }
+        try require(publications.count == 2 && model.reorderPreview?.slot == 1,
+                    "Moving outside the grid collapsed or repeatedly invalidated the held insertion gap")
+
+        model.clearReorderDragState()
+        try require(publications.count == 3 && model.reorderPreview == nil, "Finishing the drag did not clear its held gap once")
+        model.clearReorderDragState()
+        try require(publications.count == 3, "Clearing an already-empty preview emitted another change")
+        model.open(group)
+        model.updateFolderPagerLayout(
+            origin: CGPoint(x: 200, y: 260), cellWidth: 140, columnCount: 3,
+            capacity: 9, columnSpacing: 24, rowSpacing: 20, itemHeight: 120
+        )
+        model.startReorderDrag(apps[0].id)
+        for _ in 0..<30 { model.updateReorderDrag(localX: 201, localYFromTop: 280) }
+        try require(publications.count == 4 && model.reorderPreview?.slot == 0, "A stationary folder drag repeatedly published the same preview")
+        try require(model.groups == [group], "Insertion previews changed folder membership before dropping")
+    }
+
+    private static func hidingLauncherCancelsDragWithoutChangingLayout() throws {
+        _ = NSApplication.shared
+        for applicationDidHide in [false, true] {
+            let context = try makeDefaults()
+            defer { context.defaults.removePersistentDomain(forName: context.domain) }
+            let model = LauncherModel(defaults: context.defaults, autoScan: false)
+            let apps = (0..<3).map { AppItem(url: URL(fileURLWithPath: "/Applications/HideDragApp\($0).app")) }
+            let group = AppGroup(name: "Folder", appPaths: apps.prefix(2).map(\.url.path))
+            let order = [apps[2].id, LauncherEntry.group(group).id]
+            model.apps = apps
+            model.groups = [group]
+            model.rootOrder = order
+            let size = CGSize(width: 1_000, height: 640)
+            let metrics = LaunchpadLayoutMetrics.calculate(containerWidth: size.width, containerHeight: size.height, preferredIconSize: 92)
+            model.updateRootPagerLayout(topOffset: 100, size: size, metrics: metrics, pageSize: metrics.capacity)
+            model.open(group)
+            model.startReorderDrag(apps[0].id)
+            try require(model.continueReorderDragOutsideFolder(), "The cancellation test could not begin a root drag")
+            model.updateReorderDrag(
+                localX: (size.width - metrics.gridWidth) / 2 + 1,
+                localYFromTop: 100 + metrics.topInset + metrics.iconSize / 2
+            )
+            try require(model.reorderPreview != nil, "The cancellation test did not produce an active drag preview")
+            if applicationDidHide { model.handleApplicationDidHide() }
+            else { model.dismissLauncher(animated: false) }
+            try require(
+                model.reorderDragSourceID == nil && model.reorderPreview == nil,
+                "Hiding the launcher left an active drag or insertion placeholder"
+            )
+            try require(model.groups == [group] && model.rootEntries.map(\.id) == order, "Hiding the launcher committed an unfinished drag")
+            let restored = LauncherModel(defaults: context.defaults, autoScan: false)
+            restored.apps = apps
+            try require(
+                restored.groups == [group] && restored.rootEntries.map(\.id) == order,
+                "Hiding the launcher persisted an unfinished drag"
+            )
+        }
     }
 
     private static func folderRemovalMatchesNativeLifecycle() throws {
@@ -573,6 +965,73 @@ struct LauncherQualityTests {
         try require(model.folderPager.page == 0, "Negative folder-page overflow was not clamped")
     }
 
+    private static func pageNavigationDoesNotRestoreStaleDestinations() async throws {
+        let context = try makeDefaults()
+        defer { context.defaults.removePersistentDomain(forName: context.domain) }
+        let model = LauncherModel(defaults: context.defaults, autoScan: false)
+        model.setPageCount(3)
+
+        for page in [1, 2, 0, 2] {
+            model.goToPage(page)
+            try require(
+                model.currentPage == page && model.displayedPage == page,
+                "Rapid page navigation delayed the visible destination"
+            )
+        }
+
+        model.search = "Find an application"
+        try await Task.sleep(for: .milliseconds(180))
+        try require(
+            model.currentPage == 0 && model.displayedPage == 0,
+            "An old page transition restored its destination after starting a search"
+        )
+
+        model.search = ""
+        model.goToPage(2)
+        model.setPageCount(1)
+        try await Task.sleep(for: .milliseconds(180))
+        try require(
+            model.currentPage == 0 && model.displayedPage == 0,
+            "An old page transition restored an out-of-range page after the page count shrank"
+        )
+    }
+
+    private static func folderNavigationDoesNotRestoreStaleDestinations() async throws {
+        let context = try makeDefaults()
+        defer { context.defaults.removePersistentDomain(forName: context.domain) }
+        let model = LauncherModel(defaults: context.defaults, autoScan: false)
+        let apps = (0..<20).map { AppItem(url: URL(fileURLWithPath: "/Applications/FolderApp\($0).app")) }
+        let group = AppGroup(name: "Folder", appPaths: apps.map(\.url.path))
+        model.apps = apps
+        model.groups = [group]
+        model.open(group)
+        model.setFolderPageCount(3)
+
+        for page in [1, 2, 0, 2] {
+            model.goToFolderPage(page)
+            try require(
+                model.folderPager.page == page && model.folderPager.displayedPage == page,
+                "Rapid folder navigation delayed the visible destination"
+            )
+        }
+
+        model.setFolderPageCount(1)
+        try await Task.sleep(for: .milliseconds(180))
+        try require(
+            model.folderPager.page == 0 && model.folderPager.displayedPage == 0,
+            "An old folder transition restored an out-of-range page after the page count shrank"
+        )
+
+        model.setFolderPageCount(3)
+        model.goToFolderPage(2)
+        model.closeFolder()
+        try await Task.sleep(for: .milliseconds(180))
+        try require(
+            model.openGroupID == nil && model.folderPager.page == 0 && model.folderPager.displayedPage == 0,
+            "An old folder transition restored a destination after closing the folder"
+        )
+    }
+
     private static func modalUIBlocksBackgroundPageNavigation() throws {
         let context = try makeDefaults()
         defer { context.defaults.removePersistentDomain(forName: context.domain) }
@@ -684,8 +1143,12 @@ struct LauncherQualityTests {
             "Reference icon size did not honor its 72-point minimum"
         )
         try require(
-            abs(LauncherModel.referenceDefaultIconSize(pageWidth: 1_430) - 92.95) < 0.001,
-            "Reference icon size did not follow the enlarged screen-width formula"
+            LauncherModel.referenceDefaultIconSize(pageWidth: 1_440) == 90,
+            "The 1440-point Sequoia reference did not use a 90-point icon canvas"
+        )
+        try require(
+            abs(LauncherModel.referenceDefaultIconSize(pageWidth: 1_430) - 89.375) < 0.001,
+            "Reference icon size did not preserve the measured screen-width proportion"
         )
         try require(
             LauncherModel.referenceDefaultIconSize(pageWidth: 1_800) == 112,
@@ -695,8 +1158,11 @@ struct LauncherQualityTests {
         let context = try makeDefaults()
         defer { context.defaults.removePersistentDomain(forName: context.domain) }
         let model = LauncherModel(defaults: context.defaults, autoScan: false)
+        try require(model.iconSize == 90, "A fresh install did not start with the Sequoia reference icon size")
+        model.applyReferenceDefaultIconSize(pageWidth: 1_440)
+        try require(model.iconSize == 90, "The reference screen size changed the measured icon canvas")
         model.applyReferenceDefaultIconSize(pageWidth: 1_800)
-        try require(model.iconSize == 112, "A fresh install did not use the enlarged default icon size")
+        try require(model.iconSize == 112, "Automatic icon sizing did not respect its upper limit")
         model.setIconSize(80)
         model.applyReferenceDefaultIconSize(pageWidth: 1_000)
         try require(model.iconSize == 80, "A saved user icon size was overwritten by the automatic default")
@@ -767,18 +1233,30 @@ struct LauncherQualityTests {
     }
 
     private static func rootGridUsesAvailableScreenSpace() throws {
+        // The 2880 × 1800 reference image is a 1440 × 900 point desktop;
+        // its root pager begins 50 points below the top of the display.
         let screenshotLayout = LaunchpadLayoutMetrics.calculate(
-            containerWidth: 1_848,
-            containerHeight: 956,
-            preferredIconSize: 112
+            containerWidth: 1_440,
+            containerHeight: 850,
+            preferredIconSize: 90
         )
-        try require(screenshotLayout.columns == 9, "The reference layout did not use nine columns")
+        try require(screenshotLayout.columns == 7, "The Sequoia reference layout did not use seven columns")
         try require(screenshotLayout.rows == 5, "The reference layout did not keep five rows")
-        try require(screenshotLayout.capacity == 45, "The reference page capacity was incorrect")
-        try require(screenshotLayout.iconSize == 112, "The enlarged icon size was not preserved")
-        let bottomInset = 956 - LaunchpadLayoutMetrics.bottomReserve
-            - screenshotLayout.topInset - screenshotLayout.gridHeight
-        try require(abs(bottomInset - screenshotLayout.topInset) < 0.001, "The root grid was not vertically balanced")
+        try require(screenshotLayout.capacity == 35, "The Sequoia root page did not hold 35 icons")
+        try require(screenshotLayout.iconSize == 90, "The measured icon canvas was not preserved")
+        let firstColumnCenter = (1_440 - screenshotLayout.gridWidth) / 2 + screenshotLayout.cellWidth / 2
+        try require(abs(firstColumnCenter - 180) < 0.001, "The first icon column missed its measured 180-point centre")
+        try require(abs(screenshotLayout.columnStride - 180) < 0.001, "The reference column spacing did not match Sequoia")
+        try require(abs(screenshotLayout.rowStride - 138) < 0.001, "The reference row spacing did not match Sequoia")
+        try require(abs(screenshotLayout.topInset + 50 - 72) < 0.001, "The first icon row missed its measured 72-point top edge")
+        try require(
+            abs(firstColumnCenter + Double(screenshotLayout.columns - 1) * screenshotLayout.columnStride - 1_260) < 0.001,
+            "The last icon column was not symmetric with the first"
+        )
+        try require(
+            screenshotLayout.topInset + screenshotLayout.gridHeight + LaunchpadLayoutMetrics.bottomReserve <= 850,
+            "The reference grid encroached on its page-indicator and Dock reserve"
+        )
 
         let compactLayout = LaunchpadLayoutMetrics.calculate(
             containerWidth: 760,
@@ -787,6 +1265,12 @@ struct LauncherQualityTests {
         )
         try require(compactLayout.columns == 3, "The compact layout did not reduce its column count")
         try require(compactLayout.rows == 2, "The compact layout did not reduce its row count")
+        try require(
+            compactLayout.columnStride >= compactLayout.cellWidth + 12
+                && compactLayout.rowStride >= compactLayout.cellHeight + 12
+                && compactLayout.gridWidth <= 760,
+            "Compact geometry overlapped icon cells or clipped its horizontal grid"
+        )
         try require(
             compactLayout.topInset + compactLayout.gridHeight + LaunchpadLayoutMetrics.bottomReserve <= 472,
             "The compact root grid overflowed its page"
@@ -797,9 +1281,10 @@ struct LauncherQualityTests {
             containerHeight: .greatestFiniteMagnitude,
             preferredIconSize: .greatestFiniteMagnitude
         )
-        try require(extremeLayout.capacity == 45, "Extreme root geometry was not safely bounded")
+        try require(extremeLayout.capacity == 35, "Extreme root geometry did not remain bounded to seven columns and five rows")
 
-        // Spacing stays fixed as the screen grows; extra width becomes margin.
+        // Sequoia retains seven columns on larger displays. Their spacing may
+        // grow, but unusually wide monitors must not add extra app columns.
         let laptopLayout = LaunchpadLayoutMetrics.calculate(
             containerWidth: 1_512,
             containerHeight: 868,
@@ -811,69 +1296,78 @@ struct LauncherQualityTests {
             preferredIconSize: 92
         )
         try require(
-            abs(laptopLayout.columnStride - wideLayout.columnStride) < 0.001,
-            "Icon spacing changed with screen width"
+            laptopLayout.columns == 7 && wideLayout.columns == 7,
+            "A larger display changed the native seven-column arrangement"
+        )
+        try require(
+            wideLayout.columnStride > laptopLayout.columnStride,
+            "A larger display did not distribute its seven columns across the available width"
         )
         try require(
             wideLayout.gridWidth <= LaunchpadLayoutMetrics.maximumGridWidth + 0.001,
             "The wide-screen grid exceeded its maximum width"
         )
-        try require(
-            wideLayout.columns > laptopLayout.columns,
-            "The wide screen did not add columns at the same fixed density"
-        )
-        try require(
-            wideLayout.columns == Int((LaunchpadLayoutMetrics.usableGridWidth(containerWidth: 4_096)
-                + wideLayout.horizontalSpacing) / wideLayout.columnStride),
-            "The wide-screen column count did not follow the fixed density rule"
-        )
-
         let invalidLayout = LaunchpadLayoutMetrics.calculate(
             containerWidth: .nan,
             containerHeight: .infinity,
             preferredIconSize: .nan
         )
-        try require(invalidLayout.capacity > 0, "Invalid root geometry produced an unusable capacity")
+        try require(
+            invalidLayout.capacity == 35 && invalidLayout.iconSize == 90
+                && invalidLayout.gridWidth.isFinite && invalidLayout.gridHeight.isFinite,
+            "Invalid root geometry did not fall back to a usable Sequoia layout"
+        )
     }
 
     private static func folderGridMetricsNeverOverflowTheirPanel() throws {
         let base = LaunchpadLayoutMetrics.calculate(
-            containerWidth: 1_822,
-            containerHeight: 992,
-            preferredIconSize: 92
+            containerWidth: 1_440,
+            containerHeight: 850,
+            preferredIconSize: 90
         )
         let singleRowLayout = LaunchpadLayoutMetrics.folderContent(
             base: base,
             itemCount: 2,
             rowLimit: 3
         )
-        try require(singleRowLayout.columns == 2, "A two-application folder kept unused columns")
+        try require(singleRowLayout.columns == 7, "A sparse folder compressed the native seven-column grid")
         try require(singleRowLayout.rows == 1, "A two-application folder kept unused rows")
-        try require(singleRowLayout.capacity == 2, "The single-row folder capacity was incorrect")
+        try require(singleRowLayout.capacity == 7, "The single-row folder capacity was incorrect")
         try require(folderGridFits(singleRowLayout, base: base), "The single-row folder grid overflowed")
+        let singleAppLayout = LaunchpadLayoutMetrics.folderContent(base: base, itemCount: 1, rowLimit: 5)
+        try require(
+            singleAppLayout.gridWidth == singleRowLayout.gridWidth && singleAppLayout.rows == 1,
+            "A one-app folder shrank its panel or changed its column positions"
+        )
 
         let smallFolderLayout = LaunchpadLayoutMetrics.folderContent(
             base: base,
             itemCount: 4,
             rowLimit: 3
         )
-        try require(smallFolderLayout.columns == 3, "The small folder did not use three columns")
-        try require(smallFolderLayout.rows == 2, "The small folder did not wrap to a second row")
+        try require(smallFolderLayout.columns == 7, "The small folder did not preserve seven columns")
+        try require(smallFolderLayout.rows == 1, "Four apps wrapped before the native row was full")
         try require(folderGridFits(smallFolderLayout, base: base), "The small folder grid overflowed")
+        let twoRowLayout = LaunchpadLayoutMetrics.folderContent(base: base, itemCount: 8, rowLimit: 5)
+        try require(twoRowLayout.rows == 2 && twoRowLayout.capacity == 14, "The eighth folder app did not start the second row")
+        try require(
+            twoRowLayout.columnStride == base.columnStride && twoRowLayout.rowStride == base.rowStride,
+            "Folder icon positions did not reuse the root's measured spacing"
+        )
 
         let multiPageLayout = LaunchpadLayoutMetrics.folderContent(
             base: base,
             itemCount: 50,
-            rowLimit: 3
+            rowLimit: 5
         )
         try require(
             multiPageLayout.columns == base.columns,
             "The large folder did not reuse the root column count"
         )
-        try require(multiPageLayout.rows == 3, "The large folder did not fit three rows")
+        try require(multiPageLayout.rows == 5, "The large folder did not fit the native five rows")
         try require(
-            multiPageLayout.pageCount(forItemCount: 50) > 1,
-            "The large folder unexpectedly fit on one page"
+            multiPageLayout.capacity == 35 && multiPageLayout.pageCount(forItemCount: 50) == 2,
+            "The large folder did not page after its thirty-fifth icon"
         )
         try require(
             multiPageLayout.gridHeight > singleRowLayout.gridHeight,
@@ -892,6 +1386,12 @@ struct LauncherQualityTests {
             rowLimit: 2
         )
         try require(compactLayout.rows == 2, "A compact folder ignored its row limit")
+        try require(
+            compactLayout.columns == compactBase.columns
+                && compactLayout.columnStride >= compactLayout.cellWidth + 12
+                && compactLayout.rowStride >= compactLayout.cellHeight + 12,
+            "Compact folder cells overlapped or departed from the root's available columns"
+        )
         try require(
             compactLayout.pageCount(forItemCount: 20) >= 3,
             "The compact folder page count was incorrect"
@@ -954,6 +1454,19 @@ struct LauncherQualityTests {
         try require(
             LaunchpadPageMotion.visiblePages(currentPage: Int.max, pageCount: 0) == [0],
             "Invalid page state was not clamped safely"
+        )
+        try require(
+            LaunchpadPageMotion.visiblePages(currentPage: 1, pageCount: 3, reduceMotion: true) == [1],
+            "Reduce Motion left transparent neighboring pages mounted as native drop targets"
+        )
+        try require(
+            LaunchpadPageMotion.visiblePages(currentPage: 0, pageCount: 3, reduceMotion: true) == [0]
+                && LaunchpadPageMotion.visiblePages(currentPage: 2, pageCount: 3, reduceMotion: true) == [2],
+            "Reduce Motion rendered an invisible page at a pagination boundary"
+        )
+        try require(
+            LaunchpadPageMotion.visiblePages(currentPage: Int.max, pageCount: 0, reduceMotion: true) == [0],
+            "Reduce Motion did not clamp an invalid page safely"
         )
     }
 
@@ -1218,9 +1731,9 @@ struct LauncherQualityTests {
         try require(LauncherMemoryPolicy.iconDataCacheCount <= 48, "Too many encoded icons can remain cached")
         try require(LauncherMemoryPolicy.iconImageCacheCount <= 48, "Too many decoded icons can remain cached")
         try require(LauncherMemoryPolicy.backgroundCacheCount == 1, "Multiple full-size backgrounds can remain cached")
-        try require(LauncherMemoryPolicy.backgroundMaximumPixelSize <= 3_072, "Background decoding is insufficiently bounded")
+        try require(LauncherMemoryPolicy.backgroundMaximumPixelSize <= 1_536, "Blurred background decoding is insufficiently bounded")
         try require(
-            LauncherMemoryPolicy.maximumPersistentCacheCost <= 80 * 1_024 * 1_024,
+            LauncherMemoryPolicy.maximumPersistentCacheCost <= 37 * 1_024 * 1_024,
             "Persistent image caches can exceed the memory budget"
         )
     }
@@ -1327,7 +1840,7 @@ struct LauncherQualityTests {
         }
     }
 
-    private static func hiddenLauncherRetainsPreparedIconsForReopening() async throws {
+    private static func hiddenLauncherReleasesAndPreparesImagesForReopening() async throws {
         let context = try makeDefaults()
         defer { context.defaults.removePersistentDomain(forName: context.domain) }
         let model = LauncherModel(defaults: context.defaults, autoScan: false)
@@ -1335,14 +1848,21 @@ struct LauncherQualityTests {
         let app = AppItem(
             url: URL(fileURLWithPath: "/tmp/launcherx-reopen-\(UUID().uuidString).app")
         )
-
+        model.apps = [app]
         _ = await model.loadIcon(for: app)
         try require(model.cachedIcon(for: app) != nil, "The reopening test icon was not prepared")
         model.handleApplicationDidHide()
         try require(
-            model.cachedIcon(for: app) != nil,
-            "Hiding the launcher discarded the icon required for an immediate reopen"
+            model.cachedIcon(for: app) == nil && model.selectedBackgroundImage == nil,
+            "Hiding the launcher retained image resources"
         )
+        let cancelledLoad = Task { await model.loadIcon(for: app) }
+        cancelledLoad.cancel()
+        _ = await cancelledLoad.value
+        try require(model.cachedIcon(for: app) == nil, "A cancelled icon load refilled the hidden cache")
+        await model.prepareForPresentation()
+        try require(model.cachedIcon(for: app) != nil, "Reopening did not prepare the visible icon before presentation")
+        try require(!model.isLauncherVisible, "Preparing images made the hidden window visible early")
     }
 
     private static func applicationUpdatePreservesUserLayout() throws {

@@ -1,12 +1,6 @@
 import SwiftUI
 import AppKit
 
-enum LaunchpadSearchFieldMetrics {
-    static let topPadding = 80.0
-    static let capsuleHeight = 34.0
-    static var pagerTopOffset: Double { topPadding + capsuleHeight }
-}
-
 struct LauncherDisplayEntry: Identifiable {
     let id: String
     let entry: LauncherEntry?
@@ -15,6 +9,19 @@ struct LauncherDisplayEntry: Identifiable {
 struct FolderDisplayEntry: Identifiable {
     let id: String
     let app: AppItem?
+}
+
+enum LauncherDragProvider {
+    static func make(for entry: LauncherEntry) -> NSItemProvider {
+        if case .app(let app) = entry {
+            // NSString treats our app: identifier as a URL. Register the real
+            // file URL first so external destinations such as Dock receive it.
+            let provider = NSItemProvider(object: app.url as NSURL)
+            provider.registerObject(entry.id as NSString, visibility: .all)
+            return provider
+        }
+        return NSItemProvider(object: entry.id as NSString)
+    }
 }
 
 struct EntryDragPreview: View {
@@ -43,6 +50,7 @@ struct FolderDragPreview: View {
     let size: Double
 
     var body: some View {
+        let faceSize = size * 0.8
         LazyVGrid(
             columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 3),
             spacing: 3
@@ -52,6 +60,7 @@ struct FolderDragPreview: View {
                     Image(nsImage: icons[index])
                         .resizable()
                         .aspectRatio(contentMode: .fit)
+                        .frame(width: max(10, (faceSize - 22) / 3), height: max(10, (faceSize - 22) / 3))
                 } else {
                     RoundedRectangle(cornerRadius: 4)
                         .fill(Color.white.opacity(0.16))
@@ -60,17 +69,15 @@ struct FolderDragPreview: View {
                                 .font(.system(size: max(8, size * 0.09), weight: .light))
                                 .foregroundStyle(.white.opacity(0.45))
                         }
+                        .frame(height: max(10, (faceSize - 22) / 3))
                 }
             }
         }
         .padding(8)
-        .frame(width: size, height: size)
-        .background(Color.black.opacity(0.35), in: RoundedRectangle(cornerRadius: size * 0.22))
-        .overlay(
-            RoundedRectangle(cornerRadius: size * 0.22)
-                .stroke(Color.white.opacity(0.3), lineWidth: 0.8)
-        )
+        .frame(width: faceSize, height: faceSize, alignment: .topLeading)
+        .background(Color.white.opacity(0.48), in: RoundedRectangle(cornerRadius: faceSize * 0.22, style: .continuous))
         .shadow(color: .black.opacity(0.35), radius: 12, y: 6)
+        .frame(width: size, height: size)
     }
 
     nonisolated static func previewSlotCount(iconCount: Int) -> Int {
@@ -82,57 +89,75 @@ struct ContentView: View {
     @EnvironmentObject var model: LauncherModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var didRevealContent = false
+    @State private var settingsHovered = false
+
+    private var verticalMetrics: LaunchpadVerticalMetrics {
+        LaunchpadVerticalMetrics(topSafeAreaInset: model.displayTopSafeAreaInset)
+    }
 
     var body: some View {
         GeometryReader { geometry in
             ZStack {
-                LaunchpadBackground(size: geometry.size)
-                    .frame(width: geometry.size.width, height: geometry.size.height)
-                    .clipped()
-                    .ignoresSafeArea()
-                Color.clear
-                    .ignoresSafeArea()
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        if model.openGroupID != nil { model.closeFolder() } else { model.dismissLauncher() }
-                    }
-                ScrollWheelMonitor { model.navigateVisiblePages(by: $0) }
-                VStack(spacing: 0) {
-                    searchField.padding(.top, LaunchpadSearchFieldMetrics.topPadding)
-                    PagedAppGrid()
-                }
-                .opacity(didRevealContent ? 1 : 0)
-                .scaleEffect(didRevealContent ? 1 : (reduceMotion ? 1 : 1.04))
-                .offset(y: didRevealContent ? 0 : (reduceMotion ? 0 : -12))
-                .onAppear { revealContent() }
-                .onChange(of: model.isLauncherVisible) { _, visible in
-                    if visible {
-                        revealContent()
-                    } else {
-                        var transaction = Transaction()
-                        transaction.disablesAnimations = true
-                        withTransaction(transaction) { didRevealContent = false }
-                    }
-                }
-                if model.pageCount > 1 {
+                if model.isLauncherVisible {
+                    LaunchpadBackground(size: geometry.size)
+                        .frame(width: geometry.size.width, height: geometry.size.height)
+                        .clipped()
+                        .ignoresSafeArea()
+                    Color.clear
+                        .ignoresSafeArea()
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            model.handleBackgroundClick()
+                        }
+                    ScrollWheelMonitor { model.navigateVisiblePages(by: $0) }
                     VStack(spacing: 0) {
-                        Spacer(minLength: 0)
-                        LaunchpadPageIndicator(
-                            pageCount: model.pageCount,
-                            currentPage: min(model.currentPage, model.pageCount - 1),
-                            onSelect: { model.goToPage($0) }
-                        )
-                        .padding(.bottom, 26)
+                        searchField
+                            .padding(.top, verticalMetrics.searchTopPadding)
+                            .opacity(model.openGroupID == nil ? 1 : 0)
+                            .allowsHitTesting(model.openGroupID == nil)
+                            .accessibilityHidden(model.openGroupID != nil)
+                        PagedAppGrid()
                     }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .allowsHitTesting(model.openGroupID == nil)
-                    .opacity(didRevealContent && model.openGroupID == nil ? 1 : 0)
-                    .animation(
-                        reduceMotion ? nil : .easeInOut(duration: 0.2),
-                        value: model.openGroupID
-                    )
-                    .zIndex(100)
+                    .opacity(didRevealContent ? 1 : 0)
+                    .scaleEffect(didRevealContent ? 1 : (reduceMotion ? 1 : 1.04))
+                    .offset(y: didRevealContent ? 0 : (reduceMotion ? 0 : -12))
+                    .onAppear { revealContent() }
+                    if model.pageCount > 1 {
+                        VStack(spacing: 0) {
+                            Spacer(minLength: 0)
+                            LaunchpadPageIndicator(
+                                pageCount: model.pageCount,
+                                currentPage: min(model.currentPage, model.pageCount - 1),
+                                onSelect: { model.goToPage($0) }
+                            )
+                            .padding(.bottom, 100)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .allowsHitTesting(model.openGroupID == nil)
+                        .opacity(didRevealContent && model.openGroupID == nil ? 1 : 0)
+                        .animation(
+                            reduceMotion ? nil : .easeInOut(duration: 0.2),
+                            value: model.openGroupID
+                        )
+                        .zIndex(100)
+                    }
                 }
+            }
+            .onChange(of: model.isLauncherVisible) { _, visible in
+                if !visible {
+                    var transaction = Transaction()
+                    transaction.disablesAnimations = true
+                    withTransaction(transaction) { didRevealContent = false }
+                }
+            }
+            .overlay(alignment: .topTrailing) {
+                LauncherSettingsMenu()
+                    .keyboardShortcut(",", modifiers: .command)
+                    .padding(24)
+                    .padding(.top, verticalMetrics.topSafeAreaInset)
+                    .opacity(model.openGroupID == nil && (settingsHovered || model.showLauncherSettings) ? 1 : 0)
+                    .onHover { settingsHovered = $0 }
+                    .allowsHitTesting(model.openGroupID == nil)
             }
             .onAppear { model.applyReferenceDefaultIconSize(pageWidth: geometry.size.width) }
             .onChange(of: geometry.size.width) { _, width in
@@ -142,18 +167,30 @@ struct ContentView: View {
         .ignoresSafeArea()
         .allowsHitTesting(!model.isDismissing)
         .foregroundStyle(model.background == "light" ? Color.black : Color.white)
-        .confirmationDialog(model.text(
-            "Delete this application?",
-            "このアプリケーションを削除しますか？",
-            "要刪除此應用程式嗎？"
-        ),
-            isPresented: Binding(get: { model.pendingDeleteApp != nil }, set: { if !$0 { model.pendingDeleteApp = nil } })) {
-            Button(model.text("Move to Trash", "ゴミ箱に入れる", "移到垃圾桶"), role: .destructive) {
+        .confirmationDialog(
+            model.text(
+                "Delete “\(model.pendingDeleteApp?.name ?? "")”?",
+                "「\(model.pendingDeleteApp?.name ?? "")」を削除しますか？",
+                "要刪除「\(model.pendingDeleteApp?.name ?? "")」嗎？"
+            ),
+            isPresented: Binding(
+                get: { model.pendingDeleteApp != nil },
+                set: { if !$0 { model.pendingDeleteApp = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button(model.text("Delete", "削除", "刪除"), role: .destructive) {
                 model.deletePendingApplication()
             }
             Button(model.text("Cancel", "キャンセル", "取消"), role: .cancel) {
                 model.pendingDeleteApp = nil
             }
+        } message: {
+            Text(model.text(
+                "The application will be moved to the Trash. You can reinstall it from the App Store.",
+                "アプリケーションはゴミ箱へ移動します。App Storeから再インストールできます。",
+                "應用程式會移到垃圾桶。你可以從 App Store 重新安裝。"
+            ))
         }
         .alert(
             model.text("Operation Failed", "操作に失敗しました", "操作失敗"),
@@ -176,7 +213,7 @@ struct ContentView: View {
             value: model.selectedBackgroundImage != nil
         )
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            model.maximizeLauncherWindow()
+            if model.isLauncherVisible { model.maximizeLauncherWindow() }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
             model.handleApplicationDidResignActive()
@@ -184,52 +221,33 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didHideNotification)) { _ in
             model.handleApplicationDidHide()
         }
-        .onExitCommand {
-            if model.openGroupID != nil { model.closeFolder() } else { model.dismissLauncher() }
-        }
+        .onExitCommand { model.handleEscape() }
+
     }
 
     private func revealContent() {
         guard !didRevealContent else { return }
-        withAnimation(.easeOut(duration: 0.35)) { didRevealContent = true }
+        withAnimation(.easeOut(duration: reduceMotion ? LaunchpadPageMotion.reducedMotionDuration : 0.35)) {
+            didRevealContent = true
+        }
     }
 
     private var searchField: some View {
-        HStack(spacing: 7) {
-            Image(systemName: "magnifyingglass").foregroundStyle(searchSymbolColor)
-            TextField(
-                model.text("Search", "検索", "搜尋"),
-                text: $model.search,
-                prompt: searchPrompt
-            )
-            .textFieldStyle(.plain).frame(width: 210)
-            if !model.search.isEmpty {
-                Button { model.search = "" } label: { Image(systemName: "xmark.circle.fill") }
-                    .buttonStyle(.plain).foregroundStyle(searchSymbolColor)
-                    .accessibilityLabel(model.text("Clear Search", "検索を消去", "清除搜尋"))
-            }
-            LauncherSettingsMenu()
-        }
-        .padding(.leading, 12).padding(.trailing, 6).frame(height: LaunchpadSearchFieldMetrics.capsuleHeight)
-        .launchpadGlass(
-            in: Capsule(),
-            interactive: true,
+        LaunchpadSearchField(
+            text: $model.search,
+            placeholder: model.text("Search", "検索", "搜尋"),
+            clearButtonLabel: model.text("Clear Search", "検索を消去", "清除搜尋"),
+            isAvailable: model.isLauncherVisible && !model.isDismissing
+                && model.openGroupID == nil && !model.showLauncherSettings
+                && model.pendingDeleteApp == nil && model.errorMessage == nil
+                && !model.isDeleting && model.reorderDragSourceID == nil,
             reducesTransparency: model.reducesTransparency,
-            solidStyle: usesLightSearchContent ? .light : .dark
+            usesDarkText: model.background == "light",
+            onInteraction: { model.clearKeyboardSelection() },
+            onSubmit: { model.activateKeyboardSelection() },
+            onCancel: { model.handleEscape() }
         )
-    }
-
-    private var usesLightSearchContent: Bool { model.background == "light" }
-
-    private var searchSymbolColor: Color {
-        guard !usesLightSearchContent, model.reducesTransparency else { return .secondary }
-        return .white.opacity(0.72)
-    }
-
-    private var searchPrompt: Text? {
-        guard !usesLightSearchContent, model.reducesTransparency else { return nil }
-        return Text(model.text("Search", "検索", "搜尋"))
-            .foregroundColor(.white.opacity(0.55))
+        .frame(width: 250, height: LaunchpadVerticalMetrics.searchFieldHeight)
     }
 }
 
@@ -442,7 +460,8 @@ struct PagedAppGrid: View {
             let metrics = LaunchpadLayoutMetrics.calculate(
                 containerWidth: geometry.size.width,
                 containerHeight: geometry.size.height,
-                preferredIconSize: model.iconSize
+                preferredIconSize: model.iconSize,
+                topSafeAreaInset: model.displayTopSafeAreaInset
             )
             let pageCount = max(1, Int(ceil(Double(allEntries.count) / Double(metrics.capacity))))
 
@@ -482,47 +501,36 @@ struct PagedAppGrid: View {
     }
 }
 
-/// Geometry of a classic Launchpad inline folder expansion: the page splits
-/// at the folder's row, rows above move up, rows below move down, and the
-/// folder content occupies the gap between them.
-struct FolderSplitState: Equatable {
+/// A Sequoia folder replaces the root grid with a centred, full-width panel.
+struct FolderPresentationState: Equatable {
     let group: AppGroup
     let folderApps: [AppItem]
-    let row: Int
     let contentMetrics: LaunchpadLayoutMetrics
     let pageCount: Int
     let bandWidth: CGFloat
     let bandHeight: CGFloat
     let bandCenterY: CGFloat
-    let upwardDisplacement: CGFloat
-    let downwardDisplacement: CGFloat
 
     var folderEntryID: String { "group:" + group.id.uuidString }
 }
 
-enum FolderBandMetrics {
-    static let verticalPadding = 16.0
-    static let horizontalPadding = 20.0
-    static let titleHeight = 30.0
-    static let titleSpacing = 10.0
-    static let indicatorHeight = 26.0
+enum FolderPanelMetrics {
+    static let verticalPadding = 46.0
+    static let horizontalPadding = 40.0
+    static let titleHeight = 36.0
+    static let titleSpacing = 14.0
+    static let indicatorHeight = 20.0
     static let indicatorSpacing = 10.0
-    static let cornerRadius = 28.0
-    static let minimumEdgeInset = 12.0
+    static let cornerRadius = 40.0
+    static let minimumEdgeInset = 16.0
     static let minimumBandWidth = 360.0
 
     static func chromeHeight(includesIndicator: Bool) -> Double {
-        verticalPadding * 2 + titleHeight + titleSpacing
-            + (includesIndicator ? indicatorHeight + indicatorSpacing : 0)
+        verticalPadding * 2 + (includesIndicator ? indicatorHeight + indicatorSpacing : 0)
     }
 
-    static func bandWidth(
-        folderGridWidth: Double,
-        canvasWidth: Double,
-        sideMargin: Double
-    ) -> Double {
-        let usable = max(minimumBandWidth, canvasWidth - sideMargin * 2)
-        return min(usable, max(folderGridWidth + horizontalPadding * 2 + 32, usable * 0.56))
+    static func bandWidth(folderGridWidth: Double, canvasWidth: Double, sideMargin: Double) -> Double {
+        min(canvasWidth - 24, max(folderGridWidth + horizontalPadding * 2, canvasWidth * (1300.0 / 1440.0)))
     }
 }
 
@@ -535,12 +543,16 @@ struct RootPagerCanvas: View {
     let pageSize: Int
     let metrics: LaunchpadLayoutMetrics
 
+    private var verticalMetrics: LaunchpadVerticalMetrics {
+        LaunchpadVerticalMetrics(topSafeAreaInset: model.displayTopSafeAreaInset)
+    }
+
     var body: some View {
         GeometryReader { pagerGeometry in
             let pageWidth = max(1, pagerGeometry.size.width)
             let pageHeight = max(1, pagerGeometry.size.height)
             let activePage = min(model.displayedPage, pageCount - 1)
-            let split = folderSplitState(
+            let split = folderPresentationState(
                 pageWidth: pageWidth,
                 pageHeight: pageHeight,
                 activePage: activePage
@@ -552,49 +564,51 @@ struct RootPagerCanvas: View {
                     .gesture(pageDragGesture(pageWidth: pageWidth))
                     .gesture(
                         TapGesture().onEnded {
-                            if model.openGroupID == nil { model.dismissLauncher() }
+                            if model.openGroupID == nil { model.handleBackgroundClick() }
                         }
                     )
-                    .dropDestination(for: String.self) { items, _ in
-                        guard model.openGroupID == nil else { return false }
-                        guard let sourceID = items.first else { return false }
-                        if let preview = model.reorderPreview, model.openGroupID == nil {
-                            model.reorderToSlot(
-                                sourceID,
-                                page: preview.page,
-                                slot: preview.slot,
-                                pageSize: pageSize
-                            )
-                        } else {
-                            model.reorderToPageEnd(sourceID, page: activePage, pageSize: pageSize)
-                        }
-                        return true
+                    .dropDestination(for: String.self) { items, location in
+                        guard model.openGroupID == nil, let sourceID = items.first else { return false }
+                        // Resolve the actual release point as well as hover: native
+                        // drop delivery can arrive after the tracking timer stops.
+                        return model.reorderToSlot(
+                            sourceID,
+                            page: activePage,
+                            slot: metrics.insertionSlot(at: location, containerWidth: pageWidth),
+                            pageSize: pageSize
+                        )
                     }
 
                 ForEach(
                     LaunchpadPageMotion.visiblePages(
                         currentPage: model.displayedPage,
-                        pageCount: pageCount
+                        pageCount: pageCount,
+                        reduceMotion: reduceMotion
                     ),
                     id: \.self
                 ) { page in
                     let pageSplit = page == activePage ? split : nil
                     RootPageRows(
+                        page: page,
                         displayEntries: displayEntries(on: page),
                         metrics: metrics,
                         split: pageSplit,
                         pageWidth: pageWidth
                     )
                     .offset(
-                        x: CGFloat(page - activePage) * pageWidth
-                            + dragOffset
+                        x: reduceMotion ? 0 : CGFloat(page - activePage) * pageWidth + dragOffset
                     )
+                    .opacity(!reduceMotion || page == activePage ? 1 : 0)
+                    // Remove outgoing drop targets immediately; only the new
+                    // page fades in, so native drops cannot hit a fading page.
+                    .transition(reduceMotion ? .asymmetric(insertion: .opacity, removal: .identity) : .identity)
+                    .accessibilityHidden(page != activePage || model.openGroupID != nil)
                     .allowsHitTesting(page == model.displayedPage && split == nil && model.openGroupID == nil)
                     .compositingGroup()
                 }
 
                 if let split {
-                    FolderSplitLayer(
+                    FolderOverlay(
                         split: split,
                         canvasWidth: pageWidth,
                         canvasHeight: pageHeight,
@@ -607,98 +621,56 @@ struct RootPagerCanvas: View {
                 }
             }
             .clipped()
-            .opacity(model.reducedMotionPageHidden ? 0 : 1)
             .onAppear { reportLayout(size: pagerGeometry.size) }
             .onChange(of: pagerGeometry.size) { _, size in reportLayout(size: size) }
             .onChange(of: metrics) { _, _ in reportLayout(size: pagerGeometry.size) }
             .onChange(of: pageSize) { _, _ in reportLayout(size: pagerGeometry.size) }
+            .onChange(of: verticalMetrics) { _, _ in reportLayout(size: pagerGeometry.size) }
         }
     }
 
     private func reportLayout(size: CGSize) {
         model.updateRootPagerLayout(
-            topOffset: LaunchpadSearchFieldMetrics.pagerTopOffset,
+            topOffset: verticalMetrics.pagerTopOffset,
             size: size,
             metrics: metrics,
             pageSize: pageSize
         )
     }
 
-    private func folderSplitState(
+    private func folderPresentationState(
         pageWidth: CGFloat,
         pageHeight: CGFloat,
         activePage: Int
-    ) -> FolderSplitState? {
+    ) -> FolderPresentationState? {
         guard model.search.isEmpty,
               let group = model.group(for: model.openGroupID) else { return nil }
         let folderID = "group:" + group.id.uuidString
         guard let index = allEntries.firstIndex(where: { $0.id == folderID }),
               index / pageSize == activePage else { return nil }
 
-        let folderRow = (index % pageSize) / metrics.columns
         let folderApps = model.apps(in: group)
-        let itemCount = folderApps.count
-        let available = pageHeight - LaunchpadLayoutMetrics.bottomReserve
-        var rowLimit = min(
-            LaunchpadLayoutMetrics.folderMaximumRows,
-            metrics.rowsFitting(
-                availableHeight: available - FolderBandMetrics.chromeHeight(includesIndicator: false)
-            )
-        )
-        var content = LaunchpadLayoutMetrics.folderContent(
-            base: metrics,
-            itemCount: itemCount,
-            rowLimit: rowLimit
-        )
-        var folderPageCount = content.pageCount(forItemCount: itemCount)
+        let available = max(metrics.cellHeight + FolderPanelMetrics.verticalPadding * 2, pageHeight - 84)
+        var rowLimit = min(LaunchpadLayoutMetrics.folderMaximumRows,
+            metrics.rowsFitting(availableHeight: available - FolderPanelMetrics.chromeHeight(includesIndicator: false)))
+        var content = LaunchpadLayoutMetrics.folderContent(base: metrics, itemCount: folderApps.count, rowLimit: rowLimit)
+        var folderPageCount = content.pageCount(forItemCount: folderApps.count)
         if folderPageCount > 1 {
-            rowLimit = min(
-                LaunchpadLayoutMetrics.folderMaximumRows,
-                metrics.rowsFitting(
-                    availableHeight: available - FolderBandMetrics.chromeHeight(includesIndicator: true)
-                )
-            )
-            content = LaunchpadLayoutMetrics.folderContent(
-                base: metrics,
-                itemCount: itemCount,
-                rowLimit: rowLimit
-            )
-            folderPageCount = content.pageCount(forItemCount: itemCount)
+            rowLimit = min(LaunchpadLayoutMetrics.folderMaximumRows,
+                metrics.rowsFitting(availableHeight: available - FolderPanelMetrics.chromeHeight(includesIndicator: true)))
+            content = LaunchpadLayoutMetrics.folderContent(base: metrics, itemCount: folderApps.count, rowLimit: rowLimit)
+            folderPageCount = content.pageCount(forItemCount: folderApps.count)
         }
-
-        let bandHeight = FolderBandMetrics.chromeHeight(includesIndicator: folderPageCount > 1)
-            + content.gridHeight
-        let sideMargin = LaunchpadLayoutMetrics.sideMargin(forContainerWidth: pageWidth)
-        let bandWidth = FolderBandMetrics.bandWidth(
-            folderGridWidth: content.gridWidth,
-            canvasWidth: pageWidth,
-            sideMargin: sideMargin
-        )
-        let folderRowTop = metrics.topInset + CGFloat(folderRow) * metrics.rowStride
-        let rowCenterY = folderRowTop + metrics.cellHeight / 2
-        let minimumY = FolderBandMetrics.minimumEdgeInset
-        let maximumY = max(
-            minimumY,
-            pageHeight - LaunchpadLayoutMetrics.bottomReserve - bandHeight
-        )
-        let bandMinY = min(max(rowCenterY - bandHeight / 2, minimumY), maximumY)
-        // Rows must clear the band's final (clamped) position on both sides.
-        let bandClearance: CGFloat = 10
-        let rowAboveBottom = folderRowTop - metrics.verticalSpacing
-        let upward = max(0, rowAboveBottom - (bandMinY - bandClearance))
-        let downward = max(0, (bandMinY + bandHeight + bandClearance) - folderRowTop)
-
-        return FolderSplitState(
-            group: group,
-            folderApps: folderApps,
-            row: folderRow,
-            contentMetrics: content,
-            pageCount: folderPageCount,
-            bandWidth: bandWidth,
-            bandHeight: bandHeight,
-            bandCenterY: bandMinY + bandHeight / 2,
-            upwardDisplacement: upward,
-            downwardDisplacement: downward
+        let bandHeight = FolderPanelMetrics.chromeHeight(includesIndicator: folderPageCount > 1) + content.gridHeight
+        let bandWidth = FolderPanelMetrics.bandWidth(folderGridWidth: content.gridWidth, canvasWidth: pageWidth,
+            sideMargin: LaunchpadLayoutMetrics.sideMargin(forContainerWidth: pageWidth))
+        // The pager already excludes the safe top strip. Keep the panel
+        // centred in that usable screen area, with its title below the strip.
+        let centerY = max(bandHeight / 2 + 12, (pageHeight - LaunchpadVerticalMetrics.referencePagerTopOffset) / 2 - 5)
+        return FolderPresentationState(
+            group: group, folderApps: folderApps, contentMetrics: content,
+            pageCount: folderPageCount, bandWidth: bandWidth, bandHeight: bandHeight,
+            bandCenterY: centerY
         )
     }
 
@@ -718,7 +690,7 @@ struct RootPagerCanvas: View {
                 at: min(max(0, visualSlot), result.count)
             )
         }
-        return result
+        return Array(result.prefix(pageSize))
     }
 
     private func entries(on page: Int) -> ArraySlice<LauncherEntry> {
@@ -738,7 +710,7 @@ struct RootPagerCanvas: View {
                 let isPastLastPage = model.currentPage == pageCount - 1 && horizontal < 0
                 let resistance: CGFloat = (isPastFirstPage || isPastLastPage) ? 0.22 : 1
                 let limit = pageWidth * 0.42
-                dragOffset = min(max(horizontal * resistance, -limit), limit)
+                dragOffset = reduceMotion ? 0 : min(max(horizontal * resistance, -limit), limit)
             }
             .onEnded { value in
                 guard model.openGroupID == nil else {
@@ -779,74 +751,62 @@ struct RootPagerCanvas: View {
     }
 }
 
-/// One page of the root grid, rendered as fixed-width rows so the page can
-/// split apart at a folder row while keeping every column aligned.
+/// Every tile belongs to one identity scope, including when it crosses a row.
+/// Row-scoped stacks would destroy and recreate the moving tile at that edge.
 struct RootPageRows: View {
-    @EnvironmentObject var model: LauncherModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let page: Int
     let displayEntries: [LauncherDisplayEntry]
     let metrics: LaunchpadLayoutMetrics
-    let split: FolderSplitState?
+    let split: FolderPresentationState?
     let pageWidth: CGFloat
-
-    private var rows: [[LauncherDisplayEntry]] {
-        stride(from: 0, to: displayEntries.count, by: metrics.columns).map { start in
-            Array(displayEntries[start..<min(start + metrics.columns, displayEntries.count)])
-        }
-    }
 
     var body: some View {
         ZStack(alignment: .topLeading) {
-            ForEach(Array(rows.enumerated()), id: \.offset) { rowIndex, rowEntries in
-                HStack(spacing: metrics.horizontalSpacing) {
-                    ForEach(rowEntries) { display in
-                        if let entry = display.entry {
-                            AppCell(
-                                entry: entry,
-                                metrics: metrics,
-                                isHidden: entry.id == split?.folderEntryID
-                            )
-                        } else {
-                            Color.clear
-                                .frame(width: metrics.cellWidth, height: metrics.cellHeight)
-                        }
+            ForEach(Array(displayEntries.enumerated()), id: \.element.id) { index, display in
+                ZStack {
+                    if let entry = display.entry {
+                        AppCell(
+                            page: page,
+                            entry: entry,
+                            metrics: metrics,
+                            isHidden: entry.id == split?.folderEntryID
+                        )
+                    } else {
+                        Color.clear
                     }
                 }
-                .frame(width: metrics.gridWidth, height: metrics.cellHeight, alignment: .leading)
-                .offset(x: (pageWidth - metrics.gridWidth) / 2, y: rowYOffset(rowIndex))
+                .frame(width: metrics.cellWidth, height: metrics.cellHeight)
+                .offset(
+                    x: (pageWidth - metrics.gridWidth) / 2
+                        + CGFloat(index % metrics.columns) * metrics.columnStride,
+                    y: metrics.topInset + CGFloat(index / metrics.columns) * metrics.rowStride
+                )
+                .transition(.identity)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .opacity(split != nil ? 0 : 1)
         .animation(
             reduceMotion
-                ? .easeInOut(duration: 0.2)
+                ? .easeInOut(duration: LaunchpadPageMotion.reducedMotionDuration)
                 : .spring(response: 0.4, dampingFraction: 0.88),
             value: split
         )
         .animation(
-            reduceMotion ? .easeInOut(duration: 0.18) : .easeInOut(duration: 0.24),
+            LaunchpadReorderMotion.animation(reduceMotion: reduceMotion),
             value: displayEntries.map(\.id)
         )
-        .animation(
-            reduceMotion
-                ? .easeInOut(duration: 0.18)
-                : .spring(response: 0.3, dampingFraction: 0.85),
-            value: model.reorderPreview
-        )
-        .animation(
-            reduceMotion
-                ? .easeInOut(duration: 0.18)
-                : .spring(response: 0.3, dampingFraction: 0.85),
-            value: model.reorderDragSourceID
-        )
     }
+}
 
-    private func rowYOffset(_ rowIndex: Int) -> CGFloat {
-        let base = metrics.topInset + CGFloat(rowIndex) * metrics.rowStride
-        guard let split else { return base }
-        return rowIndex < split.row
-            ? base - split.upwardDisplacement
-            : base + split.downwardDisplacement
+private enum LaunchpadReorderMotion {
+    static func animation(reduceMotion: Bool) -> Animation {
+        // A brief, non-bouncing response keeps the insertion boundary legible
+        // with Reduce Motion, without the jump caused by disabling it entirely.
+        reduceMotion
+            ? .easeOut(duration: 0.14)
+            : .spring(response: 0.26, dampingFraction: 1)
     }
 }
 
@@ -864,12 +824,12 @@ struct LaunchpadPageIndicator: View {
                     Circle()
                         .fill(Color.white.opacity(page == currentPage ? 1 : 0.4))
                         .frame(
-                            width: page == currentPage ? 10 : 8,
-                            height: page == currentPage ? 10 : 8
+                            width: 6,
+                            height: 6
                         )
                         .shadow(color: .black.opacity(0.38), radius: 1.5, y: 1)
                 }
-                .frame(width: 24, height: 26)
+                .frame(width: 18, height: 20)
                 .contentShape(Rectangle())
                 .onTapGesture { onSelect(page) }
                 .accessibilityLabel(model.text(
@@ -880,14 +840,7 @@ struct LaunchpadPageIndicator: View {
                 .accessibilityAddTraits(page == currentPage ? [.isButton, .isSelected] : .isButton)
             }
         }
-        .padding(.horizontal, 7)
-        .frame(height: 26)
-        .launchpadGlass(
-            in: Capsule(),
-            interactive: true,
-            reducesTransparency: model.reducesTransparency
-        )
-        .shadow(color: .black.opacity(0.2), radius: 3, y: 1)
+        .frame(height: 20)
         .animation(reduceMotion ? nil : LaunchpadPageMotion.animation(), value: currentPage)
     }
 }
@@ -898,6 +851,7 @@ struct LaunchpadPageIndicator: View {
 struct AppCell: View {
     @EnvironmentObject var model: LauncherModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let page: Int
     let entry: LauncherEntry
     let metrics: LaunchpadLayoutMetrics
     var isHidden = false
@@ -907,20 +861,17 @@ struct AppCell: View {
             centerContent
                 .contentShape(Rectangle())
                 .onTapGesture {
-                    switch entry {
-                    case .app(let app): model.launch(app)
-                    case .group(let group): model.open(group)
-                    }
+                    model.activateFromPointer(entry)
                 }
                 .onDrag {
                     model.startReorderDrag(entry.id)
-                    return NSItemProvider(object: entry.id as NSString)
+                    return LauncherDragProvider.make(for: entry)
                 } preview: {
                     dragPreview
                 }
                 .dropDestination(for: String.self) { items, _ in
                     guard let sourceID = items.first else { return false }
-                    guard model.openGroupID == nil else { return false }
+                    guard model.openGroupID == nil, page == model.displayedPage else { return false }
                     model.handleDrop(sourceID, on: entry)
                     return true
                 }
@@ -931,14 +882,21 @@ struct AppCell: View {
                             "アプリケーションを削除…",
                             "刪除應用程式…"
                         ), role: .destructive) {
-                            model.pendingDeleteApp = app
+                            model.requestDeleteApplication(app)
                         }
                     }
                 }
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel(accessibilityLabel)
                 .accessibilityHint(accessibilityHint)
-                .accessibilityAddTraits(.isButton)
+                .accessibilityAddTraits(model.highlightedEntryID == entry.id ? [.isButton, .isSelected] : .isButton)
+                .simultaneousGesture(
+                    LongPressGesture(minimumDuration: 0.65, maximumDistance: 8)
+                        .onEnded { _ in model.beginEditing() }
+                )
+                .accessibilityAction(named: Text(model.text("Edit Applications", "アプリケーションを編集", "編輯應用程式"))) {
+                    model.beginEditing()
+                }
 
             if metrics.sideDropWidth > 1 {
                 HStack(spacing: 0) {
@@ -949,8 +907,13 @@ struct AppCell: View {
             }
         }
         .frame(width: metrics.cellWidth, height: metrics.cellHeight)
+        .modifier(LaunchpadTileDecoration(
+            identifier: entry.id,
+            app: { if case .app(let app) = entry { return app }; return nil }(),
+            metrics: metrics
+        ))
         .opacity(isHidden ? 0 : 1)
-        .scaleEffect(isHidden ? 1.3 : 1)
+        .scaleEffect(isHidden && !reduceMotion ? 1.3 : 1)
         .animation(
             reduceMotion
                 ? .easeInOut(duration: 0.16)
@@ -975,7 +938,7 @@ struct AppCell: View {
 
     private func cellLabel(_ text: String) -> some View {
         Text(text)
-            .font(.system(size: LaunchpadLayoutMetrics.labelFontSize, weight: .medium))
+            .font(.system(size: LaunchpadLayoutMetrics.labelFontSize, weight: .regular))
             .lineLimit(1)
             .truncationMode(.tail)
             .frame(maxWidth: .infinity)
@@ -988,9 +951,8 @@ struct AppCell: View {
             .contentShape(Rectangle())
             .dropDestination(for: String.self) { items, _ in
                 guard let sourceID = items.first else { return false }
-                guard model.openGroupID == nil else { return false }
-                model.reorder(sourceID, beside: entry.id, after: after)
-                return true
+                guard model.openGroupID == nil, page == model.displayedPage else { return false }
+                return model.reorder(sourceID, beside: entry.id, after: after)
             }
     }
 
@@ -1030,9 +992,8 @@ struct AppIconCellContent: View {
     var body: some View {
         VStack(spacing: LaunchpadLayoutMetrics.iconLabelPadding) {
             ApplicationArtwork(app: app, size: metrics.iconSize)
-                .shadow(color: .black.opacity(0.32), radius: 7, y: 4)
             Text(app.name)
-                .font(.system(size: LaunchpadLayoutMetrics.labelFontSize, weight: .medium))
+                .font(.system(size: LaunchpadLayoutMetrics.labelFontSize, weight: .regular))
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .frame(maxWidth: .infinity)
@@ -1051,23 +1012,23 @@ struct FolderIconArtwork: View {
     private var preview: [AppItem] { Array(model.apps(in: group).prefix(9)) }
 
     var body: some View {
+        let faceSize = size * 0.8
         LazyVGrid(
             columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 3),
             spacing: 3
         ) {
             ForEach(preview) { app in
-                ApplicationArtwork(app: app, size: max(12, (size - 22) / 3))
+                ApplicationArtwork(app: app, size: max(10, (faceSize - 22) / 3))
             }
         }
         .padding(8)
+        .frame(width: faceSize, height: faceSize, alignment: .topLeading)
+        .background(Color.white.opacity(model.reducesTransparency ? 0.62 : 0.48),
+            in: RoundedRectangle(cornerRadius: faceSize * 0.22, style: .continuous))
+        .shadow(color: .black.opacity(0.18), radius: 1, y: 1)
         .frame(width: size, height: size)
-        .launchpadGlass(
-            in: RoundedRectangle(cornerRadius: size * 0.22),
-            interactive: true,
-            reducesTransparency: model.reducesTransparency
-        )
-        .shadow(color: .black.opacity(0.3), radius: 7, y: 4)
     }
+
 }
 
 struct ApplicationArtwork: View {
@@ -1111,6 +1072,7 @@ struct ApplicationArtwork: View {
             guard !Task.isCancelled, model.isLauncherVisible else { return }
             state.finishLoading(loadedIcon, appID: app.id)
         }
+        .onDisappear { state.releaseIcon() }
     }
 
     private func renderedIcon(_ icon: NSImage) -> some View {
@@ -1149,14 +1111,11 @@ final class ApplicationArtworkState: ObservableObject {
     }
 }
 
-/// Classic inline folder expansion: a full-canvas catcher closes the folder,
-/// while drop targets are split so the folder band itself always accepts
-/// apps into the folder and only the area outside the band moves apps out.
-/// It belongs to the same Launchpad page visually — no separate floating
-/// window.
-struct FolderSplitLayer: View {
+/// The folder panel and its outside drop regions share the root coordinate
+/// space, so the current drag can continue into the root grid on exit.
+struct FolderOverlay: View {
     @EnvironmentObject var model: LauncherModel
-    let split: FolderSplitState
+    let split: FolderPresentationState
     let canvasWidth: CGFloat
     let canvasHeight: CGFloat
     let rootMetrics: LaunchpadLayoutMetrics
@@ -1166,11 +1125,11 @@ struct FolderSplitLayer: View {
     var body: some View {
         Color.clear
             .contentShape(Rectangle())
-            .onTapGesture { model.closeFolder() }
+            .onTapGesture { model.handleBackgroundClick() }
 
         outsideBandDropRegions
 
-        FolderExpandedBand(split: split, canvasWidth: canvasWidth, canvasHeight: canvasHeight)
+        FolderPanel(split: split, canvasWidth: canvasWidth, canvasHeight: canvasHeight)
             .position(x: canvasWidth / 2, y: split.bandCenterY)
     }
 
@@ -1218,8 +1177,7 @@ struct FolderSplitLayer: View {
         Color.clear
             .frame(width: width, height: height)
             .contentShape(Rectangle())
-            .position(x: x + width / 2, y: y + height / 2)
-            .onTapGesture { model.closeFolder() }
+            .onTapGesture { model.handleBackgroundClick() }
             .dropDestination(for: String.self) { items, location in
                 guard width > 0, height > 0, let sourceID = items.first else { return false }
                 let canvasPoint = CGPoint(
@@ -1234,48 +1192,37 @@ struct FolderSplitLayer: View {
                     pageSize: rootPageSize
                 )
             }
+            // Keep the drop location local to this rectangle. Applying
+            // position first makes the callback use the enclosing canvas.
+            .position(x: x + width / 2, y: y + height / 2)
     }
 
     private func rootSlot(at point: CGPoint) -> Int {
-        let gridOriginX = (canvasWidth - rootMetrics.gridWidth) / 2
-        let localX = Double(point.x) - gridOriginX
-        let localY = Double(point.y) - rootMetrics.topInset
-        let column = min(
-            max(0, Int(localX / rootMetrics.columnStride)),
-            rootMetrics.columns - 1
-        )
-        let row = min(
-            max(0, Int(localY / rootMetrics.rowStride)),
-            rootMetrics.rows - 1
-        )
-        let cellDX = localX - Double(column) * rootMetrics.columnStride
-            - rootMetrics.cellWidth / 2
-        return min(
-            max(0, row * rootMetrics.columns + column + (cellDX >= 0 ? 1 : 0)),
-            rootPageSize
-        )
+        rootMetrics.insertionSlot(at: point, containerWidth: canvasWidth)
     }
+
 }
 
-struct FolderExpandedBand: View {
+struct FolderPanel: View {
     @EnvironmentObject var model: LauncherModel
     @EnvironmentObject var folderPager: FolderPagerState
-    let split: FolderSplitState
+    let split: FolderPresentationState
     let canvasWidth: CGFloat
     let canvasHeight: CGFloat
 
-    var body: some View {
-        VStack(spacing: FolderBandMetrics.titleSpacing) {
-            FolderTitleEditor(groupID: split.group.id, initialName: split.group.name)
-                .frame(height: FolderBandMetrics.titleHeight)
+    private var verticalMetrics: LaunchpadVerticalMetrics {
+        LaunchpadVerticalMetrics(topSafeAreaInset: model.displayTopSafeAreaInset)
+    }
 
+    var body: some View {
+        VStack(spacing: FolderPanelMetrics.indicatorSpacing) {
             FolderPagerCanvas(
                 group: split.group,
                 folderApps: split.folderApps,
                 capacity: split.contentMetrics.capacity,
                 pageCount: split.pageCount,
                 metrics: split.contentMetrics,
-                pageWidth: split.bandWidth - FolderBandMetrics.horizontalPadding * 2
+                pageWidth: split.bandWidth - FolderPanelMetrics.horizontalPadding * 2
             )
             .frame(height: split.contentMetrics.gridHeight)
             .clipped()
@@ -1286,12 +1233,17 @@ struct FolderExpandedBand: View {
                     currentPage: min(folderPager.page, split.pageCount - 1),
                     onSelect: { model.goToFolderPage($0) }
                 )
-                .frame(height: FolderBandMetrics.indicatorHeight)
+                .frame(height: FolderPanelMetrics.indicatorHeight)
             }
         }
-        .padding(.horizontal, FolderBandMetrics.horizontalPadding)
-        .padding(.vertical, FolderBandMetrics.verticalPadding)
+        .padding(.horizontal, FolderPanelMetrics.horizontalPadding)
+        .padding(.vertical, FolderPanelMetrics.verticalPadding)
         .frame(width: split.bandWidth, height: split.bandHeight)
+        .overlay(alignment: .top) {
+            FolderTitleEditor(groupID: split.group.id, initialName: split.group.name)
+                .frame(height: FolderPanelMetrics.titleHeight)
+                .offset(y: -FolderPanelMetrics.titleHeight - FolderPanelMetrics.titleSpacing)
+        }
         .background(bandBackdrop)
         .contentShape(Rectangle())
         .dropDestination(for: String.self) { items, _ in
@@ -1304,38 +1256,19 @@ struct FolderExpandedBand: View {
         }
         .onChange(of: split.pageCount) { _, count in model.setFolderPageCount(count) }
         .onChange(of: split) { _, _ in reportFolderLayout() }
+        .onChange(of: verticalMetrics) { _, _ in reportFolderLayout() }
     }
 
-    /// A quiet translucent wash that reads as part of the page rather than a
-    /// standalone floating card.
     private var bandBackdrop: some View {
-        let shape = RoundedRectangle(cornerRadius: FolderBandMetrics.cornerRadius, style: .continuous)
-        return ZStack {
-            if usesStaticBackdrop {
-                shape.fill(Color.black.opacity(0.48))
-            } else {
-                shape.fill(.ultraThinMaterial)
-                shape.fill(Color.black.opacity(0.16))
-            }
-        }
-        .overlay(shape.stroke(Color.white.opacity(0.1), lineWidth: 0.8))
-        .shadow(
-            color: .black.opacity(usesStaticBackdrop ? 0.14 : 0.2),
-            radius: usesStaticBackdrop ? 8 : 16,
-            y: usesStaticBackdrop ? 3 : 5
-        )
-    }
-
-    private var usesStaticBackdrop: Bool {
-        model.reducesTransparency || split.pageCount > 1
+        RoundedRectangle(cornerRadius: FolderPanelMetrics.cornerRadius, style: .continuous)
+            .fill(Color.white.opacity(model.reducesTransparency ? 0.62 : 0.48))
     }
 
     private func reportFolderLayout() {
         let bandMinY = split.bandCenterY - split.bandHeight / 2
         let gridOriginX = (canvasWidth - split.contentMetrics.gridWidth) / 2
-        let gridOriginY = LaunchpadSearchFieldMetrics.pagerTopOffset
-            + bandMinY + FolderBandMetrics.verticalPadding
-            + FolderBandMetrics.titleHeight + FolderBandMetrics.titleSpacing
+        let gridOriginY = verticalMetrics.pagerTopOffset
+            + bandMinY + FolderPanelMetrics.verticalPadding
         model.updateFolderPagerLayout(
             origin: CGPoint(x: gridOriginX, y: gridOriginY),
             cellWidth: split.contentMetrics.cellWidth,
@@ -1343,7 +1276,13 @@ struct FolderExpandedBand: View {
             capacity: split.contentMetrics.capacity,
             columnSpacing: split.contentMetrics.horizontalSpacing,
             rowSpacing: split.contentMetrics.verticalSpacing,
-            itemHeight: split.contentMetrics.cellHeight
+            itemHeight: split.contentMetrics.cellHeight,
+            bandFrame: CGRect(
+                x: (canvasWidth - split.bandWidth) / 2,
+                y: verticalMetrics.pagerTopOffset + bandMinY,
+                width: split.bandWidth,
+                height: split.bandHeight
+            )
         )
     }
 }
@@ -1363,7 +1302,7 @@ struct FolderTitleEditor: View {
                 text: $draftName
             )
             .textFieldStyle(.plain)
-            .font(.system(size: 20, weight: .semibold))
+            .font(.system(size: 28, weight: .light))
             .multilineTextAlignment(.center)
             .lineLimit(1)
             .truncationMode(.tail)
@@ -1376,12 +1315,9 @@ struct FolderTitleEditor: View {
             if !isEditing {
                 HStack(spacing: 7) {
                     Text(currentName)
-                        .font(.system(size: 20, weight: .semibold))
+                        .font(.system(size: 28, weight: .light))
                         .lineLimit(1)
                         .shadow(color: .black.opacity(0.6), radius: 2, y: 1)
-                    Image(systemName: "pencil.circle.fill")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity)
                 .contentShape(Rectangle())
@@ -1652,63 +1588,47 @@ struct FolderPagerCanvas: View {
     let metrics: LaunchpadLayoutMetrics
     let pageWidth: CGFloat
 
-    private var columns: [GridItem] {
-        Array(
-            repeating: GridItem(
-                .fixed(metrics.cellWidth),
-                spacing: metrics.horizontalSpacing
-            ),
-            count: metrics.columns
-        )
-    }
-
     var body: some View {
         ZStack(alignment: .top) {
             Color.clear
                 .contentShape(Rectangle())
                 .gesture(pageDragGesture)
-                .dropDestination(for: String.self) { items, _ in
+                .dropDestination(for: String.self) { items, location in
                     guard let sourceID = items.first else { return false }
-                    if let preview = model.reorderPreview, model.openGroupID != nil {
-                        return model.dropInOpenGroup(
-                            sourceID,
-                            page: min(folderPager.page, pageCount - 1),
-                            capacity: capacity,
-                            slot: preview.slot
-                        )
-                    } else {
-                        return model.dropInOpenGroup(
-                            sourceID,
-                            page: min(folderPager.page, pageCount - 1),
-                            capacity: capacity,
-                            slot: nil
-                        )
-                    }
+                    return model.dropInOpenGroup(
+                        sourceID,
+                        page: min(folderPager.page, pageCount - 1),
+                        capacity: capacity,
+                        slot: metrics.insertionSlot(at: location, containerWidth: pageWidth)
+                    )
                 }
+
 
             ForEach(
                 LaunchpadPageMotion.visiblePages(
                     currentPage: folderPager.displayedPage,
-                    pageCount: pageCount
+                    pageCount: pageCount,
+                    reduceMotion: reduceMotion
                 ),
                 id: \.self
             ) { page in
                 FolderAppGrid(
+                    page: page,
                     group: group,
                     displayApps: displayApps(on: page),
-                    columns: columns,
                     metrics: metrics
                 )
                 .frame(maxWidth: .infinity, alignment: .top)
                 .offset(
-                    x: CGFloat(page - min(folderPager.displayedPage, pageCount - 1)) * pageWidth
-                        + dragOffset
+                    x: reduceMotion ? 0 : CGFloat(page - min(folderPager.displayedPage, pageCount - 1)) * pageWidth + dragOffset
                 )
+                .opacity(!reduceMotion || page == folderPager.displayedPage ? 1 : 0)
+                .transition(reduceMotion ? .asymmetric(insertion: .opacity, removal: .identity) : .identity)
+                .accessibilityHidden(page != folderPager.displayedPage)
                 .allowsHitTesting(page == folderPager.displayedPage)
                 .compositingGroup()
             }
         }
-        .opacity(folderPager.reducedMotionPageHidden ? 0 : 1)
     }
 
     private func displayApps(on page: Int) -> [FolderDisplayEntry] {
@@ -1740,7 +1660,7 @@ struct FolderPagerCanvas: View {
                 let isPastLastPage = folderPager.page == pageCount - 1 && horizontal < 0
                 let resistance: CGFloat = (isPastFirstPage || isPastLastPage) ? 0.22 : 1
                 let limit = pageWidth * 0.42
-                dragOffset = min(max(horizontal * resistance, -limit), limit)
+                dragOffset = reduceMotion ? 0 : min(max(horizontal * resistance, -limit), limit)
             }
             .onEnded { value in
                 let horizontal = value.translation.width
@@ -1783,39 +1703,42 @@ struct FolderPagerCanvas: View {
 }
 
 struct FolderAppGrid: View {
-    @EnvironmentObject var model: LauncherModel
+    let page: Int
     let group: AppGroup
     let displayApps: [FolderDisplayEntry]
-    let columns: [GridItem]
     let metrics: LaunchpadLayoutMetrics
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        LazyVGrid(columns: columns, alignment: .leading, spacing: metrics.verticalSpacing) {
-            ForEach(displayApps) { display in
-                if let app = display.app {
-                    FolderAppTile(group: group, app: app, metrics: metrics)
-                } else {
-                    Color.clear
-                        .frame(width: metrics.cellWidth, height: metrics.cellHeight)
+        ZStack(alignment: .topLeading) {
+            ForEach(Array(displayApps.enumerated()), id: \.element.id) { index, display in
+                ZStack {
+                    if let app = display.app {
+                        FolderAppTile(page: page, group: group, app: app, metrics: metrics)
+                    } else {
+                        Color.clear
+                    }
                 }
+                .frame(width: metrics.cellWidth, height: metrics.cellHeight)
+                .offset(
+                    x: CGFloat(index % metrics.columns) * metrics.columnStride,
+                    y: CGFloat(index / metrics.columns) * metrics.rowStride
+                )
+                .transition(.identity)
             }
         }
         .animation(
-            reduceMotion ? .easeInOut(duration: 0.18) : .spring(response: 0.3, dampingFraction: 0.85),
-            value: model.reorderPreview
+            LaunchpadReorderMotion.animation(reduceMotion: reduceMotion),
+            value: displayApps.map(\.id)
         )
-        .animation(
-            reduceMotion ? .easeInOut(duration: 0.18) : .spring(response: 0.3, dampingFraction: 0.85),
-            value: model.reorderDragSourceID
-        )
-        .frame(width: metrics.gridWidth, alignment: .topLeading)
+        .frame(width: metrics.gridWidth, height: metrics.gridHeight, alignment: .topLeading)
         .frame(maxHeight: .infinity, alignment: .topLeading)
     }
 }
 
 struct FolderAppTile: View {
     @EnvironmentObject var model: LauncherModel
+    let page: Int
     let group: AppGroup
     let app: AppItem
     let metrics: LaunchpadLayoutMetrics
@@ -1824,18 +1747,30 @@ struct FolderAppTile: View {
         ZStack {
             AppIconCellContent(app: app, metrics: metrics)
                 .contentShape(Rectangle())
-                .onTapGesture { model.launch(app) }
+                .onTapGesture {
+                    model.activateFromPointer(.app(app))
+                }
+                .simultaneousGesture(
+                    LongPressGesture(minimumDuration: 0.65, maximumDistance: 8)
+                        .onEnded { _ in model.beginEditing() }
+                )
                 .onDrag {
                     model.startReorderDrag(app.id)
-                    return NSItemProvider(object: app.id as NSString)
+                    return LauncherDragProvider.make(for: .app(app))
                 } preview: {
                     EntryDragPreview(icon: model.cachedIcon(for: app), iconSize: metrics.iconSize * 1.12)
                 }
                 .dropDestination(for: String.self) { items, _ in
                     guard let sourceID = items.first else { return false }
+                    guard model.openGroupID == group.id, page == model.folderPager.displayedPage else { return false }
                     return model.dropInOpenGroup(sourceID, beside: app.id, after: false)
                 }
                 .contextMenu {
+                    if app.isDeletable {
+                        Button(model.text("Delete Application…", "アプリケーションを削除…", "刪除應用程式…"), role: .destructive) {
+                            model.requestDeleteApplication(app)
+                        }
+                    }
                     Button(model.text("Remove from Folder", "フォルダから取り出す", "從資料夾移出")) {
                         model.remove(app, from: group)
                     }
@@ -1847,7 +1782,7 @@ struct FolderAppTile: View {
                     "アプリケーションを開きます",
                     "開啟應用程式"
                 ))
-                .accessibilityAddTraits(.isButton)
+                .accessibilityAddTraits(model.highlightedEntryID == app.id ? [.isButton, .isSelected] : .isButton)
 
             if metrics.sideDropWidth > 1 {
                 HStack(spacing: 0) {
@@ -1858,6 +1793,7 @@ struct FolderAppTile: View {
             }
         }
         .frame(width: metrics.cellWidth, height: metrics.cellHeight)
+        .modifier(LaunchpadTileDecoration(identifier: app.id, app: app, metrics: metrics))
     }
 
     private func sideDropZone(width: CGFloat, after: Bool) -> some View {
@@ -1866,8 +1802,69 @@ struct FolderAppTile: View {
             .contentShape(Rectangle())
             .dropDestination(for: String.self) { items, _ in
                 guard let sourceID = items.first else { return false }
+                guard model.openGroupID == group.id, page == model.folderPager.displayedPage else { return false }
                 return model.dropInOpenGroup(sourceID, beside: app.id, after: after)
             }
+    }
+}
+
+/// Shared selection, edit feedback and the App Store delete badge. The
+/// animation is local to a tile; Reduce Motion never starts a repeat cycle.
+private struct LaunchpadTileDecoration: ViewModifier {
+    @EnvironmentObject var model: LauncherModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var jiggle = false
+    let identifier: String
+    let app: AppItem?
+    let metrics: LaunchpadLayoutMetrics
+
+    private var animates: Bool { model.isEditing && !reduceMotion && model.isLauncherVisible }
+    private var phase: Double { identifier.utf8.reduce(0) { $0 + Int($1) }.isMultiple(of: 2) ? 1 : -1 }
+
+    func body(content: Content) -> some View {
+        content
+            .background(alignment: .top) {
+                let highlightSize = metrics.iconSize * 0.8 + 10
+                RoundedRectangle(cornerRadius: highlightSize * 0.24, style: .continuous)
+                    .fill(Color.white.opacity(0.18))
+                    .frame(width: highlightSize, height: highlightSize)
+                    .offset(y: (metrics.iconSize - highlightSize) / 2)
+                    .opacity(model.highlightedEntryID == identifier ? 1 : 0)
+                    .allowsHitTesting(false)
+            }
+            .overlay(alignment: .topLeading) {
+                if model.isEditing, let app, app.isDeletable {
+                    Button {
+                        model.requestDeleteApplication(app)
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 20, height: 20)
+                            .background(Color(white: 0.32), in: Circle())
+                            .overlay(Circle().stroke(Color.white.opacity(0.9), lineWidth: 1.5))
+                            .shadow(color: .black.opacity(0.3), radius: 1, y: 1)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(model.isDeleting)
+                    .offset(x: (metrics.cellWidth - metrics.iconSize * 0.8) / 2 - 10,
+                            y: metrics.iconSize * 0.1 - 10)
+                    .accessibilityLabel(model.text("Delete \(app.name)", "\(app.name)を削除", "刪除 \(app.name)"))
+                }
+            }
+            .rotationEffect(.degrees(animates ? (jiggle ? 1.15 : -1.15) * phase : 0))
+            .onAppear { updateJiggle() }
+            .onChange(of: animates) { _, _ in updateJiggle() }
+    }
+
+    private func updateJiggle() {
+        if animates {
+            withAnimation(.easeInOut(duration: 0.13).repeatForever(autoreverses: true)) { jiggle = true }
+        } else {
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) { jiggle = false }
+        }
     }
 }
 

@@ -37,7 +37,10 @@ struct ScrollWheelMonitor: NSViewRepresentable {
             uninstall()
             monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
                 guard event.windowNumber == windowNumber else { return event }
-                Task { @MainActor [weak self] in self?.handle(event) }
+                // AppKit delivers local event monitors on the main thread.
+                // Handle the gesture in event order instead of queueing one
+                // extra task for every high-frequency trackpad update.
+                MainActor.assumeIsolated { self?.handle(event) }
                 return event
             }
         }
@@ -56,6 +59,9 @@ struct ScrollWheelMonitor: NSViewRepresentable {
                 accumulated = 0
                 didPageDuringGesture = false
                 gestureAxis = nil
+                // Inertial scrolling is debounced, but an intentional new
+                // swipe must remain responsive even immediately afterward.
+                rearmAt = .distantPast
             }
 
             let gestureFinished = event.phase == .ended

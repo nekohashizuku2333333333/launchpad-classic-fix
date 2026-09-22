@@ -1,30 +1,47 @@
 import Foundation
 import CoreGraphics
 
-/// Unified layout metrics shared by the root Launchpad grid and expanded
-/// folder content. The arrangement mirrors the classic (macOS 10.7–15)
-/// Launchpad: a stable icon size, fixed cell bounds and fixed inter-cell
-/// spacing, with the whole grid centered rather than stretched across the
-/// screen. Wide screens add side margins (and at most a bounded number of
-/// extra columns) instead of growing the gaps between icons.
+/// Place the reference top margin below any camera housing on this display.
+/// Wallpaper still fills the physical screen; content and pointer
+/// coordinates share this one additional inset.
+struct LaunchpadVerticalMetrics: Equatable, Sendable {
+    static let referenceSearchTopPadding = 25.0
+    static let searchFieldHeight = 25.0
+    static let referencePagerTopOffset = referenceSearchTopPadding + searchFieldHeight
+
+    let topSafeAreaInset: Double
+
+    init(topSafeAreaInset: Double = 0) {
+        self.topSafeAreaInset = topSafeAreaInset.isFinite
+            ? min(max(0, topSafeAreaInset), 1_000) : 0
+    }
+
+    var searchTopPadding: Double { Self.referenceSearchTopPadding + topSafeAreaInset }
+    var pagerTopOffset: Double { Self.referencePagerTopOffset + topSafeAreaInset }
+}
+
+/// Geometry calibrated against a 2880 × 1800 Sequoia screenshot (@2x).
+/// At 1440 × 900 points the seven column centres are 180 points apart;
+/// rows are 138 points apart. Large screens keep seven columns, while
+/// unusually small windows reduce capacity to keep labels and icons apart.
 struct LaunchpadLayoutMetrics: Equatable, Sendable {
     static let minimumIconSize = 60.0
     static let maximumIconSize = 112.0
-    static let defaultIconSize = 92.0
+    static let defaultIconSize = 90.0
 
-    static let iconLabelPadding = 7.0
+    static let iconLabelPadding = 2.0
     static let labelHeight = 20.0
     static let labelFontSize = 13.0
 
-    static let maximumColumns = 12
+    static let maximumColumns = 7
     static let maximumRows = 5
-    static let folderMaximumRows = 3
+    static let folderMaximumRows = 5
 
     static let minimumSideMargin = 40.0
     static let maximumSideMargin = 140.0
-    static let maximumGridWidth = 1760.0
+    static let maximumGridWidth = 3200.0
     static let minimumTopInset = 16.0
-    static let bottomReserve = 64.0
+    static let bottomReserve = 120.0
 
     let iconSize: Double
     let cellWidth: Double
@@ -74,60 +91,47 @@ struct LaunchpadLayoutMetrics: Equatable, Sendable {
     nonisolated static func calculate(
         containerWidth: Double,
         containerHeight: Double,
-        preferredIconSize: Double
+        preferredIconSize: Double,
+        topSafeAreaInset: Double = 0
     ) -> LaunchpadLayoutMetrics {
-        let safeWidth = containerWidth.isFinite ? min(max(containerWidth, 1), 100_000) : 1_440
-        let safeHeight = containerHeight.isFinite ? min(max(containerHeight, 1), 100_000) : 760
+        let width = containerWidth.isFinite ? min(max(containerWidth, 1), 100_000) : 1_440
+        let height = containerHeight.isFinite ? min(max(containerHeight, 1), 100_000) : 850
         let iconSize = clampedIconSize(preferredIconSize)
-        let horizontalSpacing = horizontalSpacing(forIconSize: iconSize)
-        let verticalSpacing = verticalSpacing(forIconSize: iconSize)
-        let usableWidth = usableGridWidth(containerWidth: safeWidth)
-        let columnStride = cellWidth(forIconSize: iconSize) + horizontalSpacing
-        let possibleColumns = Int((usableWidth + horizontalSpacing) / columnStride)
-        let columns = min(max(1, possibleColumns), maximumColumns)
-
-        let availableHeight = max(
-            cellHeight(forIconSize: iconSize),
-            safeHeight - minimumTopInset - bottomReserve
-        )
-        let rowStride = cellHeight(forIconSize: iconSize) + verticalSpacing
-        let possibleRows = Int((availableHeight + verticalSpacing) / rowStride)
-        let rows = min(max(1, possibleRows), maximumRows)
-
+        let cellWidth = cellWidth(forIconSize: iconSize)
+        let cellHeight = cellHeight(forIconSize: iconSize)
+        let layoutWidth = min(width, 3_600)
+        var columns = maximumColumns
+        while columns > 1, layoutWidth / Double(columns + 1) < cellWidth + 12 { columns -= 1 }
+        let horizontalSpacing = max(12, layoutWidth / Double(columns + 1) - cellWidth)
+        let vertical = LaunchpadVerticalMetrics(topSafeAreaInset: topSafeAreaInset)
+        // Keep the row spacing when moving content below the camera housing.
+        // Capacity uses the smaller pager height, preserving the Dock reserve.
+        let screenHeight = height + vertical.pagerTopOffset
+        let topInset = max(12, min(72, screenHeight * 0.08) - LaunchpadVerticalMetrics.referencePagerTopOffset)
+        let desiredStride = min(180, screenHeight * (138.0 / 900.0))
+        let verticalSpacing = max(12, desiredStride - cellHeight)
+        let availableHeight = max(cellHeight, height - topInset - bottomReserve)
+        let rows = min(maximumRows, max(1, Int((availableHeight + verticalSpacing) / (cellHeight + verticalSpacing))))
         return makeMetrics(
-            iconSize: iconSize,
-            horizontalSpacing: horizontalSpacing,
-            verticalSpacing: verticalSpacing,
-            columns: columns,
-            rows: rows,
-            containerHeight: safeHeight,
-            centersVertically: true
+            iconSize: iconSize, horizontalSpacing: horizontalSpacing,
+            verticalSpacing: verticalSpacing, columns: columns, rows: rows,
+            topInset: topInset
         )
     }
 
-    /// Folder content keeps the exact icon size, cell size and spacing of the
-    /// root grid; only the column/row counts adapt to the item count so a
-    /// sparse folder stays centered at a natural size instead of stretching.
+    /// Folder columns keep their root positions, including sparse last rows.
+    /// The panel grows by whole rows and pages after five rows.
     nonisolated static func folderContent(
         base: LaunchpadLayoutMetrics,
         itemCount: Int,
         rowLimit: Int
     ) -> LaunchpadLayoutMetrics {
-        let safeCount = min(max(0, itemCount), 1_000_000)
-        let columns = min(
-            base.columns,
-            safeCount <= 2 ? max(1, safeCount) : max(3, Int(ceil(Double(safeCount) / 3)))
-        )
-        let requiredRows = Int(ceil(Double(max(1, safeCount)) / Double(columns)))
-        let rows = min(max(1, rowLimit), max(1, requiredRows))
+        let count = min(max(1, itemCount), 1_000_000)
+        let rows = min(max(1, rowLimit), folderMaximumRows, Int(ceil(Double(count) / Double(base.columns))))
         return makeMetrics(
-            iconSize: base.iconSize,
-            horizontalSpacing: base.horizontalSpacing,
-            verticalSpacing: base.verticalSpacing,
-            columns: columns,
-            rows: rows,
-            containerHeight: 0,
-            centersVertically: false
+            iconSize: base.iconSize, horizontalSpacing: base.horizontalSpacing,
+            verticalSpacing: base.verticalSpacing, columns: base.columns,
+            rows: max(1, rows), topInset: 0
         )
     }
 
@@ -137,32 +141,32 @@ struct LaunchpadLayoutMetrics: Equatable, Sendable {
         verticalSpacing: Double,
         columns: Int,
         rows: Int,
-        containerHeight: Double,
-        centersVertically: Bool
+        topInset: Double
     ) -> LaunchpadLayoutMetrics {
         let cellWidth = cellWidth(forIconSize: iconSize)
         let cellHeight = cellHeight(forIconSize: iconSize)
-        let safeColumns = max(1, columns)
-        let safeRows = max(1, rows)
-        let gridWidth = Double(safeColumns) * cellWidth
-            + Double(safeColumns - 1) * horizontalSpacing
-        let gridHeight = Double(safeRows) * cellHeight
-            + Double(safeRows - 1) * verticalSpacing
-        let topInset = centersVertically
-            ? max(minimumTopInset, (containerHeight - bottomReserve - gridHeight) / 2)
-            : 0
+        let columns = max(1, columns)
+        let rows = max(1, rows)
         return LaunchpadLayoutMetrics(
-            iconSize: iconSize,
-            cellWidth: cellWidth,
-            cellHeight: cellHeight,
-            horizontalSpacing: horizontalSpacing,
-            verticalSpacing: verticalSpacing,
-            columns: safeColumns,
-            rows: safeRows,
-            gridWidth: gridWidth,
-            gridHeight: gridHeight,
+            iconSize: iconSize, cellWidth: cellWidth, cellHeight: cellHeight,
+            horizontalSpacing: horizontalSpacing, verticalSpacing: verticalSpacing,
+            columns: columns, rows: rows,
+            gridWidth: Double(columns) * cellWidth + Double(columns - 1) * horizontalSpacing,
+            gridHeight: Double(rows) * cellHeight + Double(rows - 1) * verticalSpacing,
             topInset: topInset
         )
+    }
+
+    /// Insertion boundary under the pointer, shared by hover and release.
+    /// Empty rows naturally clamp to the end of the page in the model.
+    func insertionSlot(at point: CGPoint, containerWidth: Double) -> Int {
+        guard point.x.isFinite, point.y.isFinite, containerWidth.isFinite else { return 0 }
+        let x = point.x - (containerWidth - gridWidth) / 2
+        let y = point.y - topInset
+        let column = Int(min(max(0, x / columnStride), Double(columns - 1)))
+        let row = Int(min(max(0, y / rowStride), Double(rows - 1)))
+        let rightHalf = x - Double(column) * columnStride >= cellWidth / 2
+        return min(row * columns + column + (rightHalf ? 1 : 0), capacity)
     }
 
     /// Number of grid rows that fit inside the given height.
