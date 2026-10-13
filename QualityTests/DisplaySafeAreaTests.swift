@@ -13,7 +13,33 @@ enum DisplaySafeAreaTests {
         try shorterDisplaysReduceCapacityBeforeReachingTheDock()
         try dragHoverUsesTheSameInsetAsTheVisibleDropSlots()
         try invalidSafeAreaValuesPreserveUsableGeometry()
-        return 5
+        try tallFolderKeepsItsTitleInsideThePager()
+        return 6
+    }
+
+    private static func tallFolderKeepsItsTitleInsideThePager() throws {
+        for topInset in [0.0, 38.0] {
+            let vertical = LaunchpadVerticalMetrics(topSafeAreaInset: topInset)
+            let pagerHeight = 900 - vertical.pagerTopOffset
+            let root = LaunchpadLayoutMetrics.calculate(
+                containerWidth: 1_440, containerHeight: pagerHeight,
+                preferredIconSize: 90, topSafeAreaInset: topInset
+            )
+            let available = pagerHeight - 84
+            for includesIndicator in [false, true] {
+                let chrome = FolderPanelMetrics.chromeHeight(includesIndicator: includesIndicator)
+                let rows = root.rowsFitting(availableHeight: available - chrome)
+                let content = LaunchpadLayoutMetrics.folderContent(base: root, itemCount: 35, rowLimit: rows)
+                let bandHeight = chrome + content.gridHeight
+                let center = FolderPanelMetrics.bandCenterY(bandHeight: bandHeight, canvasHeight: pagerHeight)
+                let panelTop = center - bandHeight / 2
+                let titleTop = panelTop - FolderPanelMetrics.titleSpacing - FolderPanelMetrics.titleHeight
+                try require(titleTop >= FolderPanelMetrics.minimumEdgeInset,
+                            "A tall folder clipped its title above the pager canvas")
+                try require(center + bandHeight / 2 <= pagerHeight - FolderPanelMetrics.minimumEdgeInset,
+                            "Reserving the folder title pushed the panel below the pager canvas")
+            }
+        }
     }
 
     private static func rectangularDisplayKeepsSequoiaReferenceGeometry() throws {

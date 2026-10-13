@@ -532,6 +532,16 @@ enum FolderPanelMetrics {
     static func bandWidth(folderGridWidth: Double, canvasWidth: Double, sideMargin: Double) -> Double {
         min(canvasWidth - 24, max(folderGridWidth + horizontalPadding * 2, canvasWidth * (1300.0 / 1440.0)))
     }
+
+    static func bandCenterY(bandHeight: Double, canvasHeight: Double) -> Double {
+        // The title is outside the panel but inside the clipped pager canvas.
+        // Reserve its entire height, not just the panel's top edge.
+        let minimumPanelTop = minimumEdgeInset + titleHeight + titleSpacing
+        return max(
+            bandHeight / 2 + minimumPanelTop,
+            (canvasHeight - LaunchpadVerticalMetrics.referencePagerTopOffset) / 2 - 5
+        )
+    }
 }
 
 struct RootPagerCanvas: View {
@@ -666,7 +676,7 @@ struct RootPagerCanvas: View {
             sideMargin: LaunchpadLayoutMetrics.sideMargin(forContainerWidth: pageWidth))
         // The pager already excludes the safe top strip. Keep the panel
         // centred in that usable screen area, with its title below the strip.
-        let centerY = max(bandHeight / 2 + 12, (pageHeight - LaunchpadVerticalMetrics.referencePagerTopOffset) / 2 - 5)
+        let centerY = FolderPanelMetrics.bandCenterY(bandHeight: bandHeight, canvasHeight: pageHeight)
         return FolderPresentationState(
             group: group, folderApps: folderApps, contentMetrics: content,
             pageCount: folderPageCount, bandWidth: bandWidth, bandHeight: bandHeight,
